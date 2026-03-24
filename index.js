@@ -1071,6 +1071,7 @@ app.post('/api/webchat/send', requirePg, async (req, res) => {
     let config = {}
     try { config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) } catch {}
     const hooksPort = config?.gateway?.hooksPort || 18789
+    const hooksToken = process.env.HOOKS_TOKEN || config?.hooks?.token || ''
     const sessionKey = `hook:webchat:${username}`
 
     // บันทึก user message ก่อน
@@ -1093,7 +1094,7 @@ app.post('/api/webchat/send', requirePg, async (req, res) => {
         port: hooksPort,
         path: '/hooks/agent',
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(hookBody) },
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(hookBody), ...(hooksToken ? { 'Authorization': `Bearer ${hooksToken}` } : {}) },
       }
       const hreq = http.request(opts, r => {
         let data = ''
@@ -1122,7 +1123,7 @@ app.post('/api/webchat/send', requirePg, async (req, res) => {
         const histRes = await new Promise((resolve, reject) => {
           const http = require('http')
           const path2 = `/sessions/${encodeURIComponent(sessionKey)}/history`
-          const opts2 = { hostname: '127.0.0.1', port: hooksPort, path: path2, method: 'GET' }
+          const opts2 = { hostname: '127.0.0.1', port: hooksPort, path: path2, method: 'GET', headers: hooksToken ? { 'Authorization': `Bearer ${hooksToken}` } : {} }
           const hr = http.request(opts2, r2 => {
             let d = ''
             r2.on('data', c => { d += c })

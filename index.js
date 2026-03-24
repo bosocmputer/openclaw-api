@@ -1116,9 +1116,11 @@ app.post('/api/webchat/send', requirePg, async (req, res) => {
     const runId = hookRes.runId
     const sessionsJsonPath = path.join(HOME, `.openclaw/agents/${agentId}/sessions/sessions.json`)
     const fullSessionKey = `agent:${agentId}:${sessionKey}`
-    const deadline = Date.now() + 30000
+    const deadline = Date.now() + 60000
     let assistantContent = null
     let lastSeenTimestamp = Date.now()
+    let stableContent = null
+    let stableAt = 0
 
     while (Date.now() < deadline) {
       await new Promise(r => setTimeout(r, 1500))
@@ -1128,7 +1130,7 @@ app.post('/api/webchat/send', requirePg, async (req, res) => {
         if (!sess?.sessionId) continue
         const jsonlPath = path.join(HOME, `.openclaw/agents/${agentId}/sessions/${sess.sessionId}.jsonl`)
         const lines = fs.readFileSync(jsonlPath, 'utf8').trim().split('\n').filter(Boolean)
-        // หา assistant message ที่เกิดหลัง request นี้
+        let found = null
         for (let i = lines.length - 1; i >= 0; i--) {
           try {
             const entry = JSON.parse(lines[i])
@@ -1136,13 +1138,25 @@ app.post('/api/webchat/send', requirePg, async (req, res) => {
             if (entryTs < lastSeenTimestamp) break
             if (entry.type === 'message' && entry.message?.role === 'assistant') {
               const textPart = entry.message.content?.find(c => c.type === 'text')
-              if (textPart?.text) { assistantContent = textPart.text; break }
+              if (textPart?.text) { found = textPart.text; break }
             }
           } catch { continue }
         }
-        if (assistantContent) break
+        if (found) {
+          if (found === stableContent) {
+            // content ไม่เปลี่ยนแปลงแล้ว — รอ stabilize 2 รอบ (3 วินาที) แล้วถือว่า done
+            if (Date.now() - stableAt >= 3000) { assistantContent = found; break }
+          } else {
+            // content ยังเปลี่ยนอยู่ — อัปเดตและรอต่อ
+            stableContent = found
+            stableAt = Date.now()
+          }
+        }
       } catch { /* ยังไม่พร้อม */ }
     }
+
+    // fallback: ใช้ stableContent ถ้า deadline หมดแต่มี content บางส่วน
+    if (!assistantContent && stableContent) assistantContent = stableContent
 
     if (!assistantContent) return res.status(504).json({ error: 'timeout รอ agent ตอบ' })
 

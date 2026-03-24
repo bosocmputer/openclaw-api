@@ -1112,32 +1112,36 @@ app.post('/api/webchat/send', requirePg, async (req, res) => {
 
     if (!hookRes.ok) return res.status(502).json({ error: 'gateway ไม่ตอบสนอง', detail: hookRes })
 
-    // poll history จนกว่าจะมี response ใหม่ (max 30s, poll ทุก 1.5s)
+    // poll จาก sessions.json + .jsonl files โดยตรง (HTTP history endpoint ต้องการ auth แบบอื่น)
     const runId = hookRes.runId
+    const sessionsJsonPath = path.join(HOME, `.openclaw/agents/${agentId}/sessions/sessions.json`)
+    const fullSessionKey = `agent:${agentId}:${sessionKey}`
     const deadline = Date.now() + 30000
     let assistantContent = null
+    let lastSeenTimestamp = Date.now()
 
     while (Date.now() < deadline) {
       await new Promise(r => setTimeout(r, 1500))
       try {
-        const histRes = await new Promise((resolve, reject) => {
-          const http = require('http')
-          const path2 = `/sessions/${encodeURIComponent(sessionKey)}/history`
-          const opts2 = { hostname: '127.0.0.1', port: hooksPort, path: path2, method: 'GET', headers: hooksToken ? { 'Authorization': `Bearer ${hooksToken}` } : {} }
-          const hr = http.request(opts2, r2 => {
-            let d = ''
-            r2.on('data', c => { d += c })
-            r2.on('end', () => { try { resolve(JSON.parse(d)) } catch { resolve(null) } })
-          })
-          hr.on('error', reject)
-          hr.end()
-        })
-        if (Array.isArray(histRes) && histRes.length) {
-          // หา assistant message ล่าสุด
-          const last = [...histRes].reverse().find(m => m.role === 'assistant')
-          if (last) { assistantContent = last.content || last.text || ''; break }
+        const sessions = JSON.parse(fs.readFileSync(sessionsJsonPath, 'utf8'))
+        const sess = sessions[fullSessionKey]
+        if (!sess?.sessionId) continue
+        const jsonlPath = path.join(HOME, `.openclaw/agents/${agentId}/sessions/${sess.sessionId}.jsonl`)
+        const lines = fs.readFileSync(jsonlPath, 'utf8').trim().split('\n').filter(Boolean)
+        // หา assistant message ที่เกิดหลัง request นี้
+        for (let i = lines.length - 1; i >= 0; i--) {
+          try {
+            const entry = JSON.parse(lines[i])
+            const entryTs = new Date(entry.timestamp).getTime()
+            if (entryTs < lastSeenTimestamp) break
+            if (entry.type === 'message' && entry.message?.role === 'assistant') {
+              const textPart = entry.message.content?.find(c => c.type === 'text')
+              if (textPart?.text) { assistantContent = textPart.text; break }
+            }
+          } catch { continue }
         }
-      } catch { /* ยังไม่พร้อม ลอง poll ต่อ */ }
+        if (assistantContent) break
+      } catch { /* ยังไม่พร้อม */ }
     }
 
     if (!assistantContent) return res.status(504).json({ error: 'timeout รอ agent ตอบ' })

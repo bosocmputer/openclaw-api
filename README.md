@@ -26,6 +26,7 @@ openclaw-api (port 4000)
 - openclaw CLI (`npm install -g openclaw`)
 - mcporter CLI (`npm install -g mcporter`)
 - openclaw-gateway รันเป็น systemd service อยู่แล้ว
+- PostgreSQL 16+ (สำหรับ /api/members และ /api/webchat/* endpoints)
 
 ## ติดตั้ง
 
@@ -45,9 +46,13 @@ nano .env
 ค่าใน `.env`:
 
 ```env
-API_TOKEN=sml-openclaw-2026    # token สำหรับ authenticate (ต้องตรงกับ openclaw-admin)
-PORT=4000                      # port (optional, default 4000)
+API_TOKEN=sml-openclaw-2026                                              # token สำหรับ authenticate (ต้องตรงกับ openclaw-admin)
+PORT=4000                                                                # port (optional, default 4000)
+DATABASE_URL=postgresql://openclaw:PASSWORD@localhost:5432/openclaw_admin  # PostgreSQL (สำหรับ members + webchat)
+HOOKS_TOKEN=<random-hex>                                                 # ต้องตรงกับ hooks.token ใน openclaw.json
 ```
+
+> `HOOKS_TOKEN` ต้องตรงกับ `hooks.token` ใน `~/.openclaw/openclaw.json` เสมอ — ใช้สำหรับ Webchat ส่งข้อความผ่าน openclaw Hooks API
 
 ## รัน
 
@@ -115,6 +120,19 @@ pm2 restart openclaw-api
 | POST | `/api/telegram/set-default` | สลับ bot เป็น default |
 | GET | `/api/doctor/status` | เช็ค config valid/invalid |
 | POST | `/api/doctor/fix` | รัน `openclaw doctor --fix` |
+| GET | `/api/members` | รายการ admin_users ทั้งหมด (ต้องการ DATABASE_URL) |
+| POST | `/api/members` | เพิ่ม admin user ใหม่ (bcrypt password) |
+| PATCH | `/api/members/:id` | แก้ role / display_name / is_active / password |
+| DELETE | `/api/members/:id` | ลบ admin user (ห้ามลบ superadmin คนสุดท้าย) |
+| GET | `/api/webchat/rooms` | list rooms (กรอง policy=allowlist ตาม ?username=) |
+| POST | `/api/webchat/rooms` | สร้าง room ใหม่ |
+| PUT | `/api/webchat/rooms/:id` | แก้ display_name / policy |
+| DELETE | `/api/webchat/rooms/:id` | ลบ room + messages |
+| POST | `/api/webchat/rooms/:id/users` | เพิ่ม user ใน allowlist |
+| DELETE | `/api/webchat/rooms/:id/users/:username` | ลบ user จาก allowlist |
+| GET | `/api/webchat/history/:roomId` | ดึง messages ของ user ใน room |
+| POST | `/api/webchat/send` | ส่งข้อความ → hooks → poll response → บันทึก PostgreSQL |
+| GET | `/api/webchat/chat-users` | list users ที่มี role=chat |
 
 ## Authentication
 
@@ -133,3 +151,10 @@ Authorization: Bearer <API_TOKEN>
 - **openclaw.json schema strict** — ไม่รองรับ unknown keys, เก็บชื่อ user แยกใน `usernames.json`
 - **Config format v2026.3.13** — botToken อยู่ใน `channels.telegram.accounts.*` เสมอ
 - **ไม่ใช้ Docker** — ต้องการ systemd สำหรับ `openclaw gateway restart`
+- **DATABASE_URL** — ต้องตั้งใน `.env` เพื่อให้ `/api/members` และ `/api/webchat/*` ทำงาน — ถ้าไม่ set จะ return 503
+- **HOOKS_TOKEN** — ต้องตรงกับ `hooks.token` ใน `~/.openclaw/openclaw.json` — ต้องเปิด `hooks.enabled=true` + `hooks.allowRequestSessionKey=true` ด้วย
+- **Webchat session key format** — gateway สร้างเป็น `agent:{agentId}:hook:webchat:{username}` — ต้อง lookup จาก `sessions.json`
+- **PostgreSQL constraint** — `admin_users_role_check` รองรับ role: `superadmin`, `admin`, `chat` (ไม่มี `viewer` แล้ว)
+
+
+

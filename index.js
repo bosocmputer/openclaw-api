@@ -836,6 +836,103 @@ app.get('/api/models', async (req, res) => {
   }
 })
 
+// ─── Members API (admin_users ใน PostgreSQL) ───────────────────────────────
+// ต้องการ pg client — ถ้าไม่มี DATABASE_URL ข้าม block นี้ไป
+let pgPool = null
+try {
+  if (process.env.DATABASE_URL) {
+    const { Pool } = require('pg')
+    pgPool = new Pool({ connectionString: process.env.DATABASE_URL })
+    console.log('PostgreSQL connected')
+  }
+} catch (e) {
+  console.warn('pg module not found — members API disabled')
+}
+
+function requirePg(req, res, next) {
+  if (!pgPool) return res.status(503).json({ error: 'Database not configured' })
+  next()
+}
+
+// GET /api/members
+app.get('/api/members', requirePg, async (req, res) => {
+  try {
+    const { rows } = await pgPool.query(
+      'SELECT id, username, role, display_name, is_active, created_at FROM admin_users ORDER BY created_at ASC'
+    )
+    res.json(rows)
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// POST /api/members
+app.post('/api/members', requirePg, async (req, res) => {
+  try {
+    const { username, password, role, display_name } = req.body
+    if (!username || !password) return res.status(400).json({ error: 'username and password required' })
+    if (!['admin', 'viewer', 'superadmin'].includes(role)) return res.status(400).json({ error: 'invalid role' })
+    const bcrypt = require('bcryptjs')
+    const hash = await bcrypt.hash(password, 12)
+    const { rows } = await pgPool.query(
+      'INSERT INTO admin_users (username, password, role, display_name) VALUES ($1, $2, $3, $4) RETURNING id, username, role, display_name, is_active, created_at',
+      [username.trim(), hash, role, display_name || username.trim()]
+    )
+    res.json(rows[0])
+  } catch (e) {
+    if (e.code === '23505') return res.status(400).json({ error: 'ชื่อผู้ใช้นี้มีอยู่แล้ว' })
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// PATCH /api/members/:id
+app.patch('/api/members/:id', requirePg, async (req, res) => {
+  try {
+    const { id } = req.params
+    const { role, display_name, is_active, password } = req.body
+    if (password !== undefined) {
+      const bcrypt = require('bcryptjs')
+      const hash = await bcrypt.hash(password, 12)
+      await pgPool.query(
+        'UPDATE admin_users SET password = $1, updated_at = now() WHERE id = $2',
+        [hash, id]
+      )
+    }
+    if (role !== undefined) {
+      if (!['admin', 'viewer', 'superadmin'].includes(role)) return res.status(400).json({ error: 'invalid role' })
+      await pgPool.query('UPDATE admin_users SET role = $1, updated_at = now() WHERE id = $2', [role, id])
+    }
+    if (display_name !== undefined) {
+      await pgPool.query('UPDATE admin_users SET display_name = $1, updated_at = now() WHERE id = $2', [display_name, id])
+    }
+    if (is_active !== undefined) {
+      await pgPool.query('UPDATE admin_users SET is_active = $1, updated_at = now() WHERE id = $2', [is_active, id])
+    }
+    res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// DELETE /api/members/:id
+app.delete('/api/members/:id', requirePg, async (req, res) => {
+  try {
+    const { id } = req.params
+    // ห้ามลบ superadmin คนสุดท้าย
+    const { rows } = await pgPool.query(
+      "SELECT id FROM admin_users WHERE role = 'superadmin' AND is_active = true"
+    )
+    const target = await pgPool.query("SELECT role FROM admin_users WHERE id = $1", [id])
+    if (target.rows[0]?.role === 'superadmin' && rows.length <= 1) {
+      return res.status(400).json({ error: 'ไม่สามารถลบ superadmin คนสุดท้ายได้' })
+    }
+    await pgPool.query('DELETE FROM admin_users WHERE id = $1', [id])
+    res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`OpenClaw API running on port ${PORT}`)
 })

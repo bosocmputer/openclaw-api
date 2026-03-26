@@ -817,21 +817,85 @@ app.post('/api/agents/:id/mcp/test', (req, res) => {
   }
 })
 
-// GET /api/models — ดึง model list จาก OpenRouter
+// GET /api/models?provider=openrouter|anthropic|google|openai|mistral|groq|kilocode
 app.get('/api/models', async (req, res) => {
   try {
     const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
-    const apiKey = config.env?.OPENROUTER_API_KEY || ''
-    const response = await fetch('https://openrouter.ai/api/v1/models', {
-      headers: { 'Authorization': `Bearer ${apiKey}` }
-    })
-    const data = await response.json()
-    const models = (data.data || []).map(m => ({
-      id: m.id,
-      name: m.name,
-      pricing: m.pricing
-    }))
-    res.json(models)
+    const provider = req.query.provider || 'openrouter'
+
+    if (provider === 'openrouter') {
+      const apiKey = config.env?.OPENROUTER_API_KEY || ''
+      const response = await fetch('https://openrouter.ai/api/v1/models', {
+        headers: { 'Authorization': `Bearer ${apiKey}` }
+      })
+      const data = await response.json()
+      const models = (data.data || []).map(m => ({ id: m.id, name: m.name, pricing: m.pricing }))
+      return res.json(models)
+    }
+
+    if (provider === 'anthropic') {
+      const apiKey = config.env?.ANTHROPIC_API_KEY || ''
+      const response = await fetch('https://api.anthropic.com/v1/models', {
+        headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' }
+      })
+      const data = await response.json()
+      const models = (data.data || []).map(m => ({ id: m.id, name: m.display_name || m.id }))
+      return res.json(models)
+    }
+
+    if (provider === 'google') {
+      const apiKey = config.env?.GEMINI_API_KEY || ''
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`)
+      const data = await response.json()
+      const models = (data.models || [])
+        .filter(m => m.supportedGenerationMethods?.includes('generateContent'))
+        .map(m => ({ id: m.name.replace('models/', ''), name: m.displayName || m.name }))
+      return res.json(models)
+    }
+
+    if (provider === 'openai') {
+      const apiKey = config.env?.OPENAI_API_KEY || ''
+      const response = await fetch('https://api.openai.com/v1/models', {
+        headers: { 'Authorization': `Bearer ${apiKey}` }
+      })
+      const data = await response.json()
+      const models = (data.data || [])
+        .filter(m => m.id.startsWith('gpt-') || m.id.startsWith('o1') || m.id.startsWith('o3'))
+        .sort((a, b) => b.created - a.created)
+        .map(m => ({ id: m.id, name: m.id }))
+      return res.json(models)
+    }
+
+    if (provider === 'mistral') {
+      const apiKey = config.env?.MISTRAL_API_KEY || ''
+      const response = await fetch('https://api.mistral.ai/v1/models', {
+        headers: { 'Authorization': `Bearer ${apiKey}` }
+      })
+      const data = await response.json()
+      const models = (data.data || []).map(m => ({ id: m.id, name: m.id }))
+      return res.json(models)
+    }
+
+    if (provider === 'groq') {
+      const apiKey = config.env?.GROQ_API_KEY || ''
+      const response = await fetch('https://api.groq.com/openai/v1/models', {
+        headers: { 'Authorization': `Bearer ${apiKey}` }
+      })
+      const data = await response.json()
+      const models = (data.data || []).map(m => ({ id: m.id, name: m.id }))
+      return res.json(models)
+    }
+
+    if (provider === 'kilocode') {
+      // Kilo AI ไม่ต้อง authentication
+      const response = await fetch('https://api.kilo.ai/api/gateway/models')
+      const data = await response.json()
+      const items = data.data || data.models || data || []
+      const models = items.map(m => ({ id: m.id || m.slug, name: m.name || m.id || m.slug }))
+      return res.json(models)
+    }
+
+    res.status(400).json({ error: `Unknown provider: ${provider}` })
   } catch (e) {
     res.status(500).json({ error: e.message })
   }

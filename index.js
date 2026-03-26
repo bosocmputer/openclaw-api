@@ -901,6 +901,42 @@ app.get('/api/models', async (req, res) => {
   }
 })
 
+// POST /api/models/test — ทดสอบ API key ฝั่ง server (แก้ปัญหา CORS)
+app.post('/api/models/test', async (req, res) => {
+  const { provider, apiKey } = req.body || {}
+  try {
+    let url, headers = {}
+
+    if (provider === 'openrouter') {
+      url = 'https://openrouter.ai/api/v1/models'
+      headers = { 'Authorization': `Bearer ${apiKey}` }
+    } else if (provider === 'anthropic') {
+      url = 'https://api.anthropic.com/v1/models'
+      headers = { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' }
+    } else if (provider === 'google') {
+      url = `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`
+    } else if (provider === 'openai') {
+      url = 'https://api.openai.com/v1/models'
+      headers = { 'Authorization': `Bearer ${apiKey}` }
+    } else if (provider === 'mistral') {
+      url = 'https://api.mistral.ai/v1/models'
+      headers = { 'Authorization': `Bearer ${apiKey}` }
+    } else if (provider === 'groq') {
+      url = 'https://api.groq.com/openai/v1/models'
+      headers = { 'Authorization': `Bearer ${apiKey}` }
+    } else if (provider === 'kilocode') {
+      return res.json({ ok: true })
+    } else {
+      return res.status(400).json({ ok: false, error: 'Unknown provider' })
+    }
+
+    const response = await fetch(url, { headers, signal: AbortSignal.timeout(8000) })
+    res.json({ ok: response.ok, status: response.status })
+  } catch (e) {
+    res.json({ ok: false, error: e.message })
+  }
+})
+
 // ─── Members API (admin_users ใน PostgreSQL) ───────────────────────────────
 // ต้องการ pg client — ถ้าไม่มี DATABASE_URL ข้าม block นี้ไป
 let pgPool = null

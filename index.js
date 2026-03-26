@@ -887,8 +887,10 @@ app.get('/api/models', async (req, res) => {
     }
 
     if (provider === 'kilocode') {
-      // Kilo AI ไม่ต้อง authentication
-      const response = await fetch('https://api.kilo.ai/api/gateway/models')
+      const apiKey = config.env?.KILOCODE_API_KEY || ''
+      const response = await fetch('https://api.kilo.ai/api/gateway/models', {
+        headers: { 'Authorization': `Bearer ${apiKey}` }
+      })
       const data = await response.json()
       const items = data.data || data.models || data || []
       const models = items.map(m => ({ id: m.id || m.slug, name: m.name || m.id || m.slug }))
@@ -925,7 +927,8 @@ app.post('/api/models/test', async (req, res) => {
       url = 'https://api.groq.com/openai/v1/models'
       headers = { 'Authorization': `Bearer ${apiKey}` }
     } else if (provider === 'kilocode') {
-      return res.json({ ok: true })
+      url = 'https://api.kilo.ai/api/gateway/models'
+      headers = { 'Authorization': `Bearer ${apiKey}` }
     } else {
       return res.status(400).json({ ok: false, error: 'Unknown provider' })
     }

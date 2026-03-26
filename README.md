@@ -15,10 +15,20 @@ openclaw-api (port 4000)
     ├── อ่าน/เขียน ~/.openclaw/openclaw.json     ← config หลัก
     ├── อ่าน/เขียน ~/.openclaw/workspace-*/
     │   ├── SOUL.md                               ← system prompt ของแต่ละ agent
-    │   └── config/mcporter.json                  ← MCP config
+    │   └── config/mcporter.json                  ← MCP server URL + access mode
     ├── รัน openclaw CLI                           ← gateway restart, doctor
-    └── รัน mcporter CLI                          ← test MCP access
+    └── รัน mcporter CLI                          ← test MCP access (list tools เท่านั้น)
+
+openclaw-gateway (agent runtime)
+    │ HTTP POST /call — direct (ไม่ผ่าน mcporter exec)
+    ▼
+SML MCP Connect (port 3002)
+    │
+    └── PostgreSQL ERP Database
 ```
+
+> **v2 Integration**: Agent เรียก MCP tools ผ่าน `curl POST /call` โดยตรง แทน mcporter exec
+> ทำให้ response time ลดจาก ~48 วินาที เหลือ ~1-3 วินาที
 
 ## Requirements
 
@@ -155,6 +165,8 @@ Authorization: Bearer <API_TOKEN>
 - **HOOKS_TOKEN** — ต้องตรงกับ `hooks.token` ใน `~/.openclaw/openclaw.json` — ต้องเปิด `hooks.enabled=true` + `hooks.allowRequestSessionKey=true` ด้วย
 - **Webchat session key format** — gateway สร้างเป็น `agent:{agentId}:hook:webchat:{username}` — ต้อง lookup จาก `sessions.json`
 - **PostgreSQL constraint** — `admin_users_role_check` รองรับ role: `superadmin`, `admin`, `chat` (ไม่มี `viewer` แล้ว)
+- **SOUL.md template (v2)** — AI เรียก MCP ผ่าน `curl POST /call` โดยตรง ไม่ใช้ mcporter exec — URL derive จาก mcporter.json อัตโนมัติ (แทนที่ `/sse` ด้วย `/call`)
+- **mcporter.json** — ยังคงใช้อยู่สำหรับ URL และ `mcp-access-mode` header — `POST /api/agents/:id/mcp/test` ยังรัน `mcporter list` เพื่อ verify tools
 
 
 

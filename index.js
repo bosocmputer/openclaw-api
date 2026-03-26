@@ -20,9 +20,11 @@ const USERNAMES_PATH = path.join(HOME, '.openclaw/usernames.json')
 const OPENCLAW_PKG = process.env.OPENCLAW_PKG || ''
 const execOpts = OPENCLAW_PKG ? { cwd: OPENCLAW_PKG } : {}
 
-// SOUL template generator — path ใช้ ~ เพื่อรองรับทุก server/user
-function generateSoulTemplate(workspace, accessMode = 'general') {
-  const configPath = `${workspace}/config/mcporter.json`
+// SOUL template generator — ใช้ HTTP POST /call แทน mcporter exec
+function generateSoulTemplate(_workspace, accessMode = 'general', mcpUrl = null) {
+  const callUrl = mcpUrl
+    ? mcpUrl.replace('/sse', '/call').replace(/\/call\/.*/, '/call')
+    : 'http://<mcp-server>:3002/call'
 
   const roleDescriptions = {
     admin:    'ผู้ช่วย AI สำหรับผู้บริหาร — เข้าถึงข้อมูลได้ทุกส่วน รวมถึงรายงานและการวิเคราะห์',
@@ -32,47 +34,46 @@ function generateSoulTemplate(workspace, accessMode = 'general') {
     general:  'ผู้ช่วย AI ทั่วไป — ค้นหาข้อมูลสินค้า ลูกค้า ผู้จำหน่าย และสต็อก',
   }
 
-  // tools ที่แต่ละ mode เห็น (ตาม test-roles.mjs EXPECTED matrix)
+  // tools ที่แต่ละ mode เห็น (ตาม work-order-openclaw-http-integration.md)
   const roleTools = {
     admin: `## Tools ที่ใช้ได้ (admin)
-- search_product       — ค้นหาสินค้า
-- search_customer      — ค้นหาลูกค้า
-- search_supplier      — ค้นหาผู้จำหน่าย
-- get_stock_balance    — ยอดคงเหลือสินค้า
-- get_product_price    — ราคาสินค้า
-- get_account_incoming     — สินค้าค้างรับ
-- get_account_outstanding  — สินค้าค้างส่ง
-- get_bookout_balance      — สินค้าค้างจอง
-- get_sales_summary        — ยอดขายรวม (admin only)
-- get_customer_rfm         — วิเคราะห์ลูกค้า RFM (admin only)
-- (+ tools ยอดขายอื่นๆ อีกหลาย tools — admin only)
-- fallback_response    — แจ้งเมื่อไม่มี tool รองรับ`,
+- search_product          — ค้นหาสินค้า
+- search_customer         — ค้นหาลูกค้า
+- search_supplier         — ค้นหาผู้จำหน่าย
+- get_stock_balance       — ยอดคงเหลือสินค้า
+- get_product_price       — ราคาสินค้า
+- get_account_incoming    — สินค้าค้างรับ
+- get_account_outstanding — สินค้าค้างส่ง
+- get_bookout_balance     — สินค้าค้างจอง
+- get_sales_summary       — ยอดขายรวม (admin only)
+- get_customer_rfm        — วิเคราะห์ลูกค้า RFM (admin only)
+- fallback_response       — แจ้งเมื่อไม่มี tool รองรับ`,
 
-    sales: `## Tools ที่ใช้ได้ (sales — 7 tools)
-- search_product           — ค้นหาสินค้า
-- search_customer          — ค้นหาลูกค้า
-- get_stock_balance        — ยอดคงเหลือสินค้า
-- get_product_price        — ราคาสินค้า
-- get_account_outstanding  — สินค้าค้างส่ง
-- get_bookout_balance      — สินค้าค้างจอง
-- fallback_response        — แจ้งเมื่อไม่มี tool รองรับ`,
+    sales: `## Tools ที่ใช้ได้ (sales)
+- search_product          — ค้นหาสินค้า
+- search_customer         — ค้นหาลูกค้า
+- get_stock_balance       — ยอดคงเหลือสินค้า
+- get_product_price       — ราคาสินค้า
+- get_account_outstanding — สินค้าค้างส่ง
+- get_bookout_balance     — สินค้าค้างจอง
+- fallback_response       — แจ้งเมื่อไม่มี tool รองรับ`,
 
-    purchase: `## Tools ที่ใช้ได้ (purchase — 5 tools)
-- search_product       — ค้นหาสินค้า
-- search_supplier      — ค้นหาผู้จำหน่าย
-- get_stock_balance    — ยอดคงเหลือสินค้า
-- get_account_incoming — สินค้าค้างรับ
-- fallback_response    — แจ้งเมื่อไม่มี tool รองรับ`,
+    purchase: `## Tools ที่ใช้ได้ (purchase)
+- search_product          — ค้นหาสินค้า
+- search_supplier         — ค้นหาผู้จำหน่าย
+- get_stock_balance       — ยอดคงเหลือสินค้า
+- get_account_incoming    — สินค้าค้างรับ
+- fallback_response       — แจ้งเมื่อไม่มี tool รองรับ`,
 
-    stock: `## Tools ที่ใช้ได้ (stock — 6 tools)
-- search_product           — ค้นหาสินค้า
-- get_stock_balance        — ยอดคงเหลือสินค้า
-- get_account_incoming     — สินค้าค้างรับ
-- get_account_outstanding  — สินค้าค้างส่ง
-- get_bookout_balance      — สินค้าค้างจอง
-- fallback_response        — แจ้งเมื่อไม่มี tool รองรับ`,
+    stock: `## Tools ที่ใช้ได้ (stock)
+- search_product          — ค้นหาสินค้า
+- get_stock_balance       — ยอดคงเหลือสินค้า
+- get_account_incoming    — สินค้าค้างรับ
+- get_account_outstanding — สินค้าค้างส่ง
+- get_bookout_balance     — สินค้าค้างจอง
+- fallback_response       — แจ้งเมื่อไม่มี tool รองรับ`,
 
-    general: `## Tools ที่ใช้ได้ (general — 4 tools)
+    general: `## Tools ที่ใช้ได้ (general)
 - search_product    — ค้นหาสินค้า
 - get_stock_balance — ยอดคงเหลือสินค้า
 - get_product_price — ราคาสินค้า
@@ -86,14 +87,33 @@ function generateSoulTemplate(workspace, accessMode = 'general') {
 
 ## กฎ
 - ดึงข้อมูลจากระบบจริงทุกครั้ง ห้ามตอบจากความจำ
-- ใช้ exec tool รันคำสั่ง mcporter
+- ใช้ exec tool รัน curl เพื่อเรียกข้อมูล ERP
 - ตอบภาษาไทย กระชับ ห้ามใช้ตาราง Markdown
 - ถ้าคำถามไม่ชัดเจนหรือไม่ระบุชื่อสินค้า/ลูกค้า ให้ถามกลับเพื่อขอข้อมูลเพิ่มเติมก่อน อย่าเรียก tool โดยไม่มีข้อมูลเพียงพอ
 - ถ้าไม่มี tool รองรับคำถามนี้ ให้แจ้งผู้ใช้ด้วยภาษาธรรมดาว่าทำอะไรได้บ้าง ห้ามตอบว่า NO_REPLY หรือข้อความ error ให้ผู้ใช้เห็น
+- ผลลัพธ์จาก curl จะอยู่ใน \`content[0].text\` — ต้อง parse JSON อีกครั้งเพื่อเอาข้อมูล
 
 ## วิธีเรียก tool
+\`\`\`bash
+curl -s -X POST ${callUrl} \\
+  -H "Content-Type: application/json" \\
+  -H "mcp-access-mode: ${accessMode}" \\
+  -d '{"name": "<tool_name>", "arguments": {<params>}}'
 \`\`\`
-mcporter call --config ${configPath} smlmcp.<tool> <params>
+
+## ตัวอย่าง
+\`\`\`bash
+# ค้นหาสินค้า
+curl -s -X POST ${callUrl} \\
+  -H "Content-Type: application/json" \\
+  -H "mcp-access-mode: ${accessMode}" \\
+  -d '{"name": "search_product", "arguments": {"keyword": "กาแฟ"}}'
+
+# ยอดคงเหลือสินค้า
+curl -s -X POST ${callUrl} \\
+  -H "Content-Type: application/json" \\
+  -H "mcp-access-mode: ${accessMode}" \\
+  -d '{"name": "get_stock_balance", "arguments": {"product_code": "P001"}}'
 \`\`\`
 
 ${tools}
@@ -194,7 +214,12 @@ app.post('/api/agents', (req, res) => {
     const workspaceTilde = workspace.startsWith(HOME)
       ? workspace.replace(HOME, '~')
       : workspace
-    const soul = generateSoulTemplate(workspaceTilde, accessMode)
+    // ดึง MCP URL จาก mcporter.json ถ้ามี
+    const newMcpPath = path.join(workspacePath, 'config/mcporter.json')
+    const newMcpConfig = fs.existsSync(newMcpPath) ? JSON.parse(fs.readFileSync(newMcpPath, 'utf8')) : {}
+    const newMcpServer = Object.values(newMcpConfig.mcpServers ?? {})[0]
+    const mcpUrl = newMcpServer?.url ?? null
+    const soul = generateSoulTemplate(workspaceTilde, accessMode, mcpUrl)
     fs.writeFileSync(path.join(workspacePath, 'SOUL.md'), soul)
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2))
     res.json({ ok: true })
@@ -214,10 +239,11 @@ app.get('/api/agents/:id/soul/template', (req, res) => {
     const server = Object.values(mcpConfig.mcpServers ?? {})[0]
     // รองรับทั้ง headers (ใหม่) และ env (เก่า)
     const accessMode = server?.headers?.['mcp-access-mode'] ?? server?.env?.MCP_ACCESS_MODE ?? 'general'
+    const mcpUrl = server?.url ?? null
     const workspaceTilde = agent.workspace.startsWith(HOME)
       ? agent.workspace.replace(HOME, '~')
       : agent.workspace
-    const soul = generateSoulTemplate(workspaceTilde, accessMode)
+    const soul = generateSoulTemplate(workspaceTilde, accessMode, mcpUrl)
     res.json({ soul, accessMode })
   } catch (e) {
     res.status(500).json({ error: e.message })

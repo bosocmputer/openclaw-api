@@ -1208,7 +1208,7 @@ app.post('/api/webchat/send', requirePg, async (req, res) => {
         })
       })
       hreq.on('error', reject)
-      const timeout = setTimeout(() => { hreq.destroy(); reject(new Error('hooks timeout')) }, 5000)
+      const timeout = setTimeout(() => { hreq.destroy(); reject(new Error('hooks timeout')) }, 15000)
       hreq.on('close', () => clearTimeout(timeout))
       hreq.write(hookBody)
       hreq.end()

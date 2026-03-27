@@ -1363,13 +1363,17 @@ app.get('/api/monitor/events', async (_req, res) => {
           continue
         }
 
-        if (!sessionInfo || !sessionInfo.sessionFile) continue
+        if (!sessionInfo) continue
+        // sessionFile may be absent for webchat sessions — derive from sessionId
+        const sessionFile = sessionInfo.sessionFile
+          || (sessionInfo.sessionId ? path.join(HOME, `.openclaw/agents/${agentId}/sessions/${sessionInfo.sessionId}.jsonl`) : null)
+        if (!sessionFile) continue
         if (!channels[channel]) channels[channel] = []
 
         // Read last 50 lines of the .jsonl file
         let lines = []
         try {
-          const content = fs.readFileSync(sessionInfo.sessionFile, 'utf8')
+          const content = fs.readFileSync(sessionFile, 'utf8')
           const allLines = content.split('\n').filter(l => l.trim())
           lines = allLines.slice(-50)
         } catch { continue }

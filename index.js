@@ -1335,6 +1335,15 @@ app.get('/api/monitor/events', async (_req, res) => {
     try { config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) } catch { config = {} }
     const agentList = (config.agents && config.agents.list) ? config.agents.list : []
 
+    // Load active webchat usernames from DB (to filter deleted rooms)
+    let activeWebchatUsernames = null
+    if (pgPool) {
+      try {
+        const r = await pgPool.query('SELECT DISTINCT username FROM webchat_messages WHERE created_at > NOW() - INTERVAL \'7 days\'')
+        activeWebchatUsernames = new Set(r.rows.map(row => row.username))
+      } catch { /* DB unavailable — skip filter */ }
+    }
+
     const today = new Date().toISOString().slice(0, 10)
     let totalMessages = 0
     let totalCostToday = 0
@@ -1365,6 +1374,8 @@ app.get('/api/monitor/events', async (_req, res) => {
           channel = 'webchat'
           const parts = key.split(':')
           user = parts[parts.length - 1]
+          // Skip if webchat user no longer has any room activity in DB
+          if (activeWebchatUsernames && !activeWebchatUsernames.has(user)) continue
         } else if (key.includes('telegram')) {
           channel = 'telegram'
           // key format e.g. agent:sale:telegram:botname:userId
@@ -1548,6 +1559,12 @@ app.get('/api/monitor/events', async (_req, res) => {
               events.push({ ts: tsFormatted, type: 'reply', text: c.slice(0, 300) })
             }
           }
+        }
+
+        // Skip stale sessions (no activity in last 24h) for telegram
+        if (channel === 'telegram' && lastMsgTs) {
+          const age = (Date.now() - new Date(lastMsgTs).getTime()) / 1000
+          if (age > 86400) continue
         }
 
         if (!channels[channel]) channels[channel] = []

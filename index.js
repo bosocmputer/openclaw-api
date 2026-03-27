@@ -1566,10 +1566,10 @@ app.get('/api/monitor/events', async (_req, res) => {
           }
         }
 
-        // Skip stale sessions (no activity in last 24h) for telegram
-        if (channel === 'telegram' && lastMsgTs) {
+        // Skip stale sessions (no activity in last 3 days)
+        if (lastMsgTs) {
           const age = (Date.now() - new Date(lastMsgTs).getTime()) / 1000
-          if (age > 86400) continue
+          if (age > 259200) continue
         }
 
         if (!channels[channel]) channels[channel] = []

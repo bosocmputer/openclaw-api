@@ -1316,6 +1316,16 @@ app.get('/api/webchat/chat-users', requirePg, async (_req, res) => {
   }
 })
 
+// Strip gateway-injected metadata headers from Telegram user messages
+function stripGatewayMetadata(text) {
+  if (!text) return text
+  // Remove blocks like:
+  // "Conversation info (untrusted metadata):\n```json\n{...}\n```\n\nSender (untrusted metadata):\n```json\n{...}\n```\n\n"
+  return text
+    .replace(/^(?:Conversation info \(untrusted metadata\):[\s\S]*?```\s*\n+)+(?:Sender \(untrusted metadata\):[\s\S]*?```\s*\n+)?/m, '')
+    .trim()
+}
+
 // GET /api/monitor/events — real-time session state across all agents and channels
 app.get('/api/monitor/events', async (_req, res) => {
   try {
@@ -1453,10 +1463,10 @@ app.get('/api/monitor/events', async (_req, res) => {
         let lastUserText = null
         if (lastUserMsg) {
           const c = lastUserMsg.content
-          if (typeof c === 'string') lastUserText = c.slice(0, 300)
+          if (typeof c === 'string') lastUserText = stripGatewayMetadata(c).slice(0, 300)
           else if (Array.isArray(c)) {
             const textItem = c.find(x => x.type === 'text')
-            if (textItem) lastUserText = textItem.text.slice(0, 300)
+            if (textItem) lastUserText = stripGatewayMetadata(textItem.text).slice(0, 300)
           }
         }
 
@@ -1506,10 +1516,10 @@ app.get('/api/monitor/events', async (_req, res) => {
           if (msg.role === 'user') {
             const c = msg.content
             let text = ''
-            if (typeof c === 'string') text = c.slice(0, 300)
+            if (typeof c === 'string') text = stripGatewayMetadata(c).slice(0, 300)
             else if (Array.isArray(c)) {
               const t = c.find(x => x.type === 'text')
-              if (t) text = t.text.slice(0, 300)
+              if (t) text = stripGatewayMetadata(t.text).slice(0, 300)
             }
             if (text) events.push({ ts: tsFormatted, type: 'message', text })
           } else if (msg.role === 'assistant') {

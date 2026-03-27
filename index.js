@@ -1316,14 +1316,15 @@ app.get('/api/webchat/chat-users', requirePg, async (_req, res) => {
   }
 })
 
-// Strip gateway-injected metadata headers from Telegram user messages
+// Strip gateway-injected metadata headers from user messages (Telegram + Webchat)
 function stripGatewayMetadata(text) {
   if (!text) return text
-  // Remove blocks like:
-  // "Conversation info (untrusted metadata):\n```json\n{...}\n```\n\nSender (untrusted metadata):\n```json\n{...}\n```\n\n"
-  return text
-    .replace(/^(?:Conversation info \(untrusted metadata\):[\s\S]*?```\s*\n+)+(?:Sender \(untrusted metadata\):[\s\S]*?```\s*\n+)?/m, '')
-    .trim()
+  let result = text
+  // Strip: "Conversation info (untrusted metadata):\n```json\n{...}\n```\n\n[Sender ...]\n\n"
+  result = result.replace(/^(?:Conversation info \(untrusted metadata\):[\s\S]*?```\s*\n+)+(?:Sender \(untrusted metadata\):[\s\S]*?```\s*\n+)?/m, '')
+  // Strip: "Task: Hook | Job ID: ... | Received: ...\n\nSECURITY NOTICE: ...\n- DO NOT ...\n- DO NOT ...\n\n"
+  result = result.replace(/^Task: Hook \|[\s\S]*?SECURITY NOTICE:[\s\S]*?(?:\n- [^\n]+)+\n*/m, '')
+  return result.trim()
 }
 
 // GET /api/monitor/events — real-time session state across all agents and channels

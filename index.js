@@ -1321,9 +1321,9 @@ function stripGatewayMetadata(text) {
   if (!text) return text
   let result = text
   // Strip: "Conversation info (untrusted metadata):\n```json\n{...}\n```\n\n[Sender ...]\n\n"
-  result = result.replace(/^(?:Conversation info \(untrusted metadata\):[\s\S]*?```\s*\n+)+(?:Sender \(untrusted metadata\):[\s\S]*?```\s*\n+)?/m, '')
-  // Strip: "Task: Hook | Job ID: ... | Received: ...\n\nSECURITY NOTICE: ...\n- DO NOT ...\n- DO NOT ...\n\n"
-  result = result.replace(/^Task: Hook \|[\s\S]*?SECURITY NOTICE:[\s\S]*?(?:\n- [^\n]+)+\n*/m, '')
+  result = result.replace(/(?:Conversation info \(untrusted metadata\):[\s\S]*?```\s*\n+)+(?:Sender \(untrusted metadata\):[\s\S]*?```\s*\n+)?/, '')
+  // Strip: "Task: Hook | Job ID: ... | Received: ...\n\nSECURITY NOTICE: ...\n- DO NOT ...\n...\n\n"
+  result = result.replace(/Task: Hook \|[\s\S]*?SECURITY NOTICE:[\s\S]*?(?:\n- [^\n]+)+\n*/, '')
   return result.trim()
 }
 

@@ -1315,6 +1315,288 @@ app.get('/api/webchat/chat-users', requirePg, async (_req, res) => {
   }
 })
 
+// GET /api/monitor/events — real-time session state across all agents and channels
+app.get('/api/monitor/events', async (_req, res) => {
+  try {
+    // Read agents from openclaw.json
+    let config = {}
+    try { config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) } catch { config = {} }
+    const agentList = (config.agents && config.agents.list) ? config.agents.list : []
+
+    const today = new Date().toISOString().slice(0, 10)
+    let totalMessages = 0
+    let totalCostToday = 0
+    let activeNow = 0
+    let errors = 0
+    let responseTimes = []
+    const globalEvents = []
+
+    const agentsResult = []
+
+    for (const agent of agentList) {
+      const agentId = agent.id
+      const sessionsPath = path.join(HOME, `.openclaw/agents/${agentId}/sessions/sessions.json`)
+
+      let sessionsMap = {}
+      try { sessionsMap = JSON.parse(fs.readFileSync(sessionsPath, 'utf8')) } catch { continue }
+
+      const channels = {}
+
+      for (const [key, sessionInfo] of Object.entries(sessionsMap)) {
+        // Skip heartbeat sessions
+        if (key.includes(':main')) continue
+
+        let channel = null
+        let user = null
+
+        if (key.includes('hook:webchat')) {
+          channel = 'webchat'
+          const parts = key.split(':')
+          user = parts[parts.length - 1]
+        } else if (key.includes('telegram')) {
+          channel = 'telegram'
+          // key format e.g. agent:sale:telegram:botname:userId
+          const parts = key.split(':')
+          const telegramIdx = parts.findIndex(p => p === 'telegram')
+          user = parts.slice(telegramIdx + 1).join(':')
+        } else {
+          continue
+        }
+
+        if (!sessionInfo || !sessionInfo.sessionFile) continue
+
+        // Read last 50 lines of the .jsonl file
+        let lines = []
+        try {
+          const content = fs.readFileSync(sessionInfo.sessionFile, 'utf8')
+          const allLines = content.split('\n').filter(l => l.trim())
+          lines = allLines.slice(-50)
+        } catch { continue }
+
+        // Parse JSONL events
+        const parsedLines = []
+        for (const line of lines) {
+          try { parsedLines.push(JSON.parse(line)) } catch { /* skip */ }
+        }
+
+        // Filter out HEARTBEAT_OK messages
+        const filtered = parsedLines.filter(msg => {
+          if (!msg) return false
+          const content = msg.content
+          if (Array.isArray(content)) {
+            return !content.some(c => typeof c === 'object' && c.type === 'tool_result' &&
+              Array.isArray(c.content) && c.content.some(x => typeof x.text === 'string' && x.text.includes('HEARTBEAT_OK')))
+          }
+          if (typeof content === 'string' && content.includes('HEARTBEAT_OK')) return false
+          return true
+        })
+
+        let lastUserMsg = null
+        let lastAssistantMsg = null
+        for (const msg of filtered) {
+          if (msg.role === 'user') lastUserMsg = msg
+          if (msg.role === 'assistant') lastAssistantMsg = msg
+        }
+
+        const lastMsg = filtered.length ? filtered[filtered.length - 1] : null
+        const lastMsgRole = lastMsg ? lastMsg.role : null
+        const lastMsgTs = lastMsg ? (lastMsg.timestamp || lastMsg.ts || null) : null
+        const lastMsgTime = lastMsgTs ? new Date(lastMsgTs) : null
+        const nowMs = Date.now()
+        const elapsedSec = lastMsgTime ? Math.floor((nowMs - lastMsgTime.getTime()) / 1000) : null
+
+        // Determine state
+        let state = 'idle'
+        if (lastMsgRole === 'user' && elapsedSec !== null && elapsedSec < 120) {
+          state = 'thinking'
+        } else if (lastMsgRole === 'assistant' && elapsedSec !== null && elapsedSec < 30) {
+          // Check for error in last assistant message
+          const hasError = (() => {
+            if (!lastMsg) return false
+            const c = lastMsg.content
+            if (Array.isArray(c)) return c.some(x => x.type === 'error' || (typeof x.text === 'string' && x.text.toLowerCase().includes('error')))
+            if (typeof c === 'string') return c.toLowerCase().includes('error')
+            return false
+          })()
+          state = hasError ? 'error' : 'replied'
+        } else if (lastMsgRole === 'assistant') {
+          const hasError = (() => {
+            if (!lastMsg) return false
+            const c = lastMsg.content
+            if (Array.isArray(c)) return c.some(x => x.type === 'error')
+            return false
+          })()
+          if (hasError) state = 'error'
+        }
+
+        if (state === 'thinking' || state === 'replied') activeNow++
+        if (state === 'error') errors++
+
+        // Extract last user text
+        let lastUserText = null
+        if (lastUserMsg) {
+          const c = lastUserMsg.content
+          if (typeof c === 'string') lastUserText = c.slice(0, 60)
+          else if (Array.isArray(c)) {
+            const textItem = c.find(x => x.type === 'text')
+            if (textItem) lastUserText = textItem.text.slice(0, 60)
+          }
+        }
+
+        // Extract last reply text
+        let lastReplyText = null
+        if (lastAssistantMsg) {
+          const c = lastAssistantMsg.content
+          if (typeof c === 'string') lastReplyText = c.slice(0, 60)
+          else if (Array.isArray(c)) {
+            const textItem = c.find(x => x.type === 'text')
+            if (textItem) lastReplyText = textItem.text.slice(0, 60)
+          }
+        }
+
+        // Count cost and today messages
+        let sessionCost = 0
+        for (const msg of filtered) {
+          if (msg.usage) {
+            const u = msg.usage
+            const inputCost = ((u.input_tokens || 0) / 1000000) * 3
+            const outputCost = ((u.output_tokens || 0) / 1000000) * 15
+            sessionCost += inputCost + outputCost
+          }
+          // Count today's messages
+          const ts = msg.timestamp || msg.ts
+          if (ts && ts.slice(0, 10) === today) {
+            totalMessages++
+          }
+        }
+        totalCostToday += sessionCost
+
+        // Calculate response time (time between last user msg and last assistant msg)
+        if (lastUserMsg && lastAssistantMsg) {
+          const userTs = lastUserMsg.timestamp || lastUserMsg.ts
+          const assistantTs = lastAssistantMsg.timestamp || lastAssistantMsg.ts
+          if (userTs && assistantTs) {
+            const diff = (new Date(assistantTs).getTime() - new Date(userTs).getTime()) / 1000
+            if (diff > 0 && diff < 3600) responseTimes.push(diff)
+          }
+        }
+
+        // Build events array from last 50 filtered lines
+        const events = []
+        for (const msg of filtered) {
+          const ts = msg.timestamp || msg.ts
+          const tsFormatted = ts ? new Date(ts).toISOString().slice(11, 19) : null
+          if (msg.role === 'user') {
+            const c = msg.content
+            let text = ''
+            if (typeof c === 'string') text = c.slice(0, 80)
+            else if (Array.isArray(c)) {
+              const t = c.find(x => x.type === 'text')
+              if (t) text = t.text.slice(0, 80)
+            }
+            if (text) events.push({ ts: tsFormatted, type: 'message', text })
+          } else if (msg.role === 'assistant') {
+            const c = msg.content
+            if (Array.isArray(c)) {
+              for (const item of c) {
+                if (item.type === 'thinking') {
+                  events.push({ ts: tsFormatted, type: 'thinking', text: (item.thinking || '').slice(0, 80) })
+                } else if (item.type === 'tool_use') {
+                  const toolText = item.name + (item.input ? ': ' + JSON.stringify(item.input).slice(0, 60) : '')
+                  events.push({ ts: tsFormatted, type: 'tool', text: toolText })
+                } else if (item.type === 'text' && item.text) {
+                  // Check for bash/exec mentions
+                  const lower = item.text.toLowerCase()
+                  if (lower.includes('bash') || lower.includes('exec')) {
+                    events.push({ ts: tsFormatted, type: 'tool', text: item.text.slice(0, 80) })
+                  } else {
+                    events.push({ ts: tsFormatted, type: 'reply', text: item.text.slice(0, 80) })
+                  }
+                } else if (item.type === 'error') {
+                  events.push({ ts: tsFormatted, type: 'error', text: (item.text || JSON.stringify(item)).slice(0, 80) })
+                }
+              }
+            } else if (typeof c === 'string') {
+              events.push({ ts: tsFormatted, type: 'reply', text: c.slice(0, 80) })
+            }
+          }
+        }
+
+        if (!channels[channel]) channels[channel] = []
+
+        const sessionEntry = {
+          sessionKey: key,
+          user,
+          state,
+          lastMessageAt: lastMsgTs || null,
+          lastUserText,
+          lastReplyText,
+          elapsed: elapsedSec,
+          cost: Math.round(sessionCost * 100000) / 100000,
+          events
+        }
+        channels[channel].push(sessionEntry)
+
+        // Add to globalEvents
+        for (const ev of events) {
+          globalEvents.push({ ts: ev.ts, agentId, channel, user, type: ev.type, text: ev.text })
+        }
+      }
+
+      agentsResult.push({ id: agentId, channels })
+    }
+
+    // Sort globalEvents by ts descending and limit to last 50
+    globalEvents.sort((a, b) => (b.ts || '').localeCompare(a.ts || ''))
+    const limitedGlobalEvents = globalEvents.slice(0, 50)
+
+    // Read gateway log from /tmp/openclaw/ — latest file, last 100 lines
+    const gatewayEvents = []
+    try {
+      const logDir = '/tmp/openclaw'
+      const logFiles = fs.readdirSync(logDir)
+        .filter(f => f.endsWith('.log') || f.endsWith('.jsonl'))
+        .map(f => ({ name: f, mtime: fs.statSync(path.join(logDir, f)).mtimeMs }))
+        .sort((a, b) => b.mtime - a.mtime)
+
+      if (logFiles.length > 0) {
+        const latestLog = path.join(logDir, logFiles[0].name)
+        const logContent = fs.readFileSync(latestLog, 'utf8')
+        const logLines = logContent.split('\n').filter(l => l.trim()).slice(-100)
+        for (const line of logLines) {
+          try {
+            const obj = JSON.parse(line)
+            const subsystem = typeof obj['0'] === 'string' ? (() => { try { return JSON.parse(obj['0']) } catch { return obj['0'] } })() : obj['0']
+            const message = obj['1'] || obj.message || ''
+            const ts = obj.time ? new Date(obj.time).toISOString().slice(11, 19) : null
+            gatewayEvents.push({ ts, subsystem, message })
+          } catch { /* skip */ }
+        }
+      }
+    } catch { /* skip if /tmp/openclaw doesn't exist */ }
+
+    const avgResponseTime = responseTimes.length
+      ? Math.round((responseTimes.reduce((a, b) => a + b, 0) / responseTimes.length) * 10) / 10
+      : 0
+
+    res.json({
+      agents: agentsResult,
+      globalEvents: limitedGlobalEvents,
+      gatewayEvents,
+      stats: {
+        totalAgents: agentList.length,
+        activeNow,
+        todayMessages: totalMessages,
+        avgResponseTime,
+        totalCostToday: Math.round(totalCostToday * 100000) / 100000,
+        errors
+      }
+    })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`OpenClaw API running on port ${PORT}`)
 })

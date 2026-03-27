@@ -1453,10 +1453,10 @@ app.get('/api/monitor/events', async (_req, res) => {
         let lastUserText = null
         if (lastUserMsg) {
           const c = lastUserMsg.content
-          if (typeof c === 'string') lastUserText = c.slice(0, 60)
+          if (typeof c === 'string') lastUserText = c.slice(0, 300)
           else if (Array.isArray(c)) {
             const textItem = c.find(x => x.type === 'text')
-            if (textItem) lastUserText = textItem.text.slice(0, 60)
+            if (textItem) lastUserText = textItem.text.slice(0, 300)
           }
         }
 
@@ -1464,10 +1464,10 @@ app.get('/api/monitor/events', async (_req, res) => {
         let lastReplyText = null
         if (lastAssistantMsg) {
           const c = lastAssistantMsg.content
-          if (typeof c === 'string') lastReplyText = c.slice(0, 60)
+          if (typeof c === 'string') lastReplyText = c.slice(0, 300)
           else if (Array.isArray(c)) {
             const textItem = c.find(x => x.type === 'text')
-            if (textItem) lastReplyText = textItem.text.slice(0, 60)
+            if (textItem) lastReplyText = textItem.text.slice(0, 300)
           }
         }
 
@@ -1506,10 +1506,10 @@ app.get('/api/monitor/events', async (_req, res) => {
           if (msg.role === 'user') {
             const c = msg.content
             let text = ''
-            if (typeof c === 'string') text = c.slice(0, 80)
+            if (typeof c === 'string') text = c.slice(0, 300)
             else if (Array.isArray(c)) {
               const t = c.find(x => x.type === 'text')
-              if (t) text = t.text.slice(0, 80)
+              if (t) text = t.text.slice(0, 300)
             }
             if (text) events.push({ ts: tsFormatted, type: 'message', text })
           } else if (msg.role === 'assistant') {
@@ -1517,24 +1517,24 @@ app.get('/api/monitor/events', async (_req, res) => {
             if (Array.isArray(c)) {
               for (const item of c) {
                 if (item.type === 'thinking') {
-                  events.push({ ts: tsFormatted, type: 'thinking', text: (item.thinking || '').slice(0, 80) })
+                  events.push({ ts: tsFormatted, type: 'thinking', text: (item.thinking || '').slice(0, 300) })
                 } else if (item.type === 'tool_use') {
-                  const toolText = item.name + (item.input ? ': ' + JSON.stringify(item.input).slice(0, 60) : '')
+                  const toolText = item.name + (item.input ? ': ' + JSON.stringify(item.input).slice(0, 300) : '')
                   events.push({ ts: tsFormatted, type: 'tool', text: toolText })
                 } else if (item.type === 'text' && item.text) {
                   // Check for bash/exec mentions
                   const lower = item.text.toLowerCase()
                   if (lower.includes('bash') || lower.includes('exec')) {
-                    events.push({ ts: tsFormatted, type: 'tool', text: item.text.slice(0, 80) })
+                    events.push({ ts: tsFormatted, type: 'tool', text: item.text.slice(0, 300) })
                   } else {
-                    events.push({ ts: tsFormatted, type: 'reply', text: item.text.slice(0, 80) })
+                    events.push({ ts: tsFormatted, type: 'reply', text: item.text.slice(0, 300) })
                   }
                 } else if (item.type === 'error') {
-                  events.push({ ts: tsFormatted, type: 'error', text: (item.text || JSON.stringify(item)).slice(0, 80) })
+                  events.push({ ts: tsFormatted, type: 'error', text: (item.text || JSON.stringify(item)).slice(0, 300) })
                 }
               }
             } else if (typeof c === 'string') {
-              events.push({ ts: tsFormatted, type: 'reply', text: c.slice(0, 80) })
+              events.push({ ts: tsFormatted, type: 'reply', text: c.slice(0, 300) })
             }
           }
         }

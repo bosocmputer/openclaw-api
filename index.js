@@ -1364,6 +1364,7 @@ app.get('/api/monitor/events', async (_req, res) => {
         }
 
         if (!sessionInfo || !sessionInfo.sessionFile) continue
+        if (!channels[channel]) channels[channel] = []
 
         // Read last 50 lines of the .jsonl file
         let lines = []

@@ -1384,8 +1384,19 @@ app.get('/api/monitor/events', async (_req, res) => {
           try { parsedLines.push(JSON.parse(line)) } catch { /* skip */ }
         }
 
+        // Normalize: jsonl entries may be {role,content,timestamp} or {type,timestamp,message:{role,content}}
+        const normalized = parsedLines.map(entry => {
+          if (!entry) return null
+          if (entry.message && entry.message.role) {
+            // wrapped format: {type, id, timestamp, message:{role,content}}
+            return { role: entry.message.role, content: entry.message.content, timestamp: entry.timestamp, usage: entry.usage }
+          }
+          // flat format: {role, content, timestamp}
+          return entry
+        }).filter(Boolean)
+
         // Filter out HEARTBEAT_OK messages
-        const filtered = parsedLines.filter(msg => {
+        const filtered = normalized.filter(msg => {
           if (!msg) return false
           const content = msg.content
           if (Array.isArray(content)) {
@@ -1412,9 +1423,9 @@ app.get('/api/monitor/events', async (_req, res) => {
 
         // Determine state
         let state = 'idle'
-        if (lastMsgRole === 'user' && elapsedSec !== null && elapsedSec < 120) {
+        if (lastMsgRole === 'user' && elapsedSec !== null && elapsedSec < 300) {
           state = 'thinking'
-        } else if (lastMsgRole === 'assistant' && elapsedSec !== null && elapsedSec < 30) {
+        } else if (lastMsgRole === 'assistant' && elapsedSec !== null && elapsedSec < 120) {
           // Check for error in last assistant message
           const hasError = (() => {
             if (!lastMsg) return false

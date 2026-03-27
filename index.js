@@ -1335,12 +1335,17 @@ app.get('/api/monitor/events', async (_req, res) => {
     try { config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) } catch { config = {} }
     const agentList = (config.agents && config.agents.list) ? config.agents.list : []
 
-    // Load active webchat usernames from DB (to filter deleted rooms)
-    let activeWebchatUsernames = null
+    // Load existing webchat rooms from DB grouped by agent_id
+    // Key: agentId → Set of usernames that still have active rooms
+    const webchatRoomsByAgent = {}
+    let webchatDbAvailable = false
     if (pgPool) {
       try {
-        const r = await pgPool.query('SELECT DISTINCT username FROM webchat_messages WHERE created_at > NOW() - INTERVAL \'7 days\'')
-        activeWebchatUsernames = new Set(r.rows.map(row => row.username))
+        const r = await pgPool.query('SELECT agent_id FROM webchat_rooms')
+        webchatDbAvailable = true
+        for (const row of r.rows) {
+          if (!webchatRoomsByAgent[row.agent_id]) webchatRoomsByAgent[row.agent_id] = true
+        }
       } catch { /* DB unavailable — skip filter */ }
     }
 
@@ -1374,8 +1379,8 @@ app.get('/api/monitor/events', async (_req, res) => {
           channel = 'webchat'
           const parts = key.split(':')
           user = parts[parts.length - 1]
-          // Skip if webchat user no longer has any room activity in DB
-          if (activeWebchatUsernames && !activeWebchatUsernames.has(user)) continue
+          // Skip if no webchat rooms exist for this agent in DB
+          if (webchatDbAvailable && !webchatRoomsByAgent[agentId]) continue
         } else if (key.includes('telegram')) {
           channel = 'telegram'
           // key format e.g. agent:sale:telegram:botname:userId

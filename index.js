@@ -646,30 +646,23 @@ app.put('/api/telegram/bindings', (req, res) => {
 
 // ─── LINE ──────────────────────────────────────────────────────────────────────
 
-// GET /api/line/botinfo — ดึงชื่อ bot จาก LINE API
-app.get('/api/line/botinfo', async (req, res) => {
+async function fetchLineBotInfo(token) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 5000)
   try {
-    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
-    const line = config.channels?.line || {}
-    const token = line.channelAccessToken || ''
-    if (!token) return res.json({ displayName: null, pictureUrl: null, basicId: null })
-    const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), 5000)
-    try {
-      const r = await fetch('https://api.line.me/v2/bot/info', {
-        headers: { Authorization: `Bearer ${token}` },
-        signal: controller.signal,
-      })
-      const j = await r.json()
-      if (!r.ok) return res.status(400).json({ error: j.message || 'LINE API error' })
-      res.json({ displayName: j.displayName, pictureUrl: j.pictureUrl, basicId: j.basicId })
-    } finally {
-      clearTimeout(timer)
-    }
-  } catch (e) {
-    res.status(500).json({ error: e.message })
+    const r = await fetch('https://api.line.me/v2/bot/info', {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: controller.signal,
+    })
+    const j = await r.json()
+    if (!r.ok) return null
+    return { displayName: j.displayName, pictureUrl: j.pictureUrl, basicId: j.basicId }
+  } catch {
+    return null
+  } finally {
+    clearTimeout(timer)
   }
-})
+}
 
 // GET /api/line — อ่าน LINE config ปัจจุบัน
 app.get('/api/line', (req, res) => {
@@ -682,19 +675,60 @@ app.get('/api/line', (req, res) => {
   }
 })
 
-// POST /api/line/accounts — เพิ่ม LINE OA (token + secret)
+// GET /api/line/botinfo — ดึงชื่อ/รูป bot ทุก account { accountId: { displayName, pictureUrl, basicId } }
+app.get('/api/line/botinfo', async (req, res) => {
+  try {
+    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
+    const line = config.channels?.line || {}
+    const results = {}
+    // format ใหม่: token อยู่ใน accounts.*
+    for (const [id, acc] of Object.entries(line.accounts || {})) {
+      if (acc?.channelAccessToken) {
+        results[id] = await fetchLineBotInfo(acc.channelAccessToken)
+      }
+    }
+    // fallback: top-level channelAccessToken (เดิม 1 OA)
+    if (!results['default'] && line.channelAccessToken) {
+      results['default'] = await fetchLineBotInfo(line.channelAccessToken)
+    }
+    res.json(results)
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// POST /api/line/accounts — เพิ่ม LINE OA account ใหม่
+// body: { accountId, channelAccessToken, channelSecret }
 app.post('/api/line/accounts', (req, res) => {
   try {
-    const { channelAccessToken, channelSecret } = req.body
-    if (!channelAccessToken || !channelSecret) {
-      return res.status(400).json({ error: 'channelAccessToken and channelSecret required' })
+    const { accountId, channelAccessToken, channelSecret } = req.body
+    if (!accountId || !channelAccessToken || !channelSecret) {
+      return res.status(400).json({ error: 'accountId, channelAccessToken and channelSecret required' })
     }
     const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
     if (!config.channels) config.channels = {}
-    if (config.channels.line?.channelAccessToken) {
-      return res.status(400).json({ error: 'LINE OA already configured. Delete first.' })
+    if (!config.channels.line) config.channels.line = { enabled: true }
+
+    // migrate จาก format เก่า (top-level token) → accounts.default
+    const line = config.channels.line
+    if (line.channelAccessToken && !line.accounts?.['default']) {
+      if (!line.accounts) line.accounts = {}
+      line.accounts['default'] = {
+        enabled: true,
+        channelAccessToken: line.channelAccessToken,
+        channelSecret: line.channelSecret || '',
+        dmPolicy: line.dmPolicy || 'pairing',
+        groupPolicy: line.groupPolicy || 'disabled',
+      }
+      delete line.channelAccessToken
+      delete line.channelSecret
     }
-    config.channels.line = {
+
+    if (!line.accounts) line.accounts = {}
+    if (line.accounts[accountId]) {
+      return res.status(400).json({ error: `Account "${accountId}" already exists` })
+    }
+    line.accounts[accountId] = {
       enabled: true,
       channelAccessToken,
       channelSecret,
@@ -708,15 +742,35 @@ app.post('/api/line/accounts', (req, res) => {
   }
 })
 
-// DELETE /api/line/accounts — ลบ LINE OA
-app.delete('/api/line/accounts', (req, res) => {
+// DELETE /api/line/accounts/:accountId — ลบ LINE OA account
+app.delete('/api/line/accounts/:accountId', (req, res) => {
   try {
+    const { accountId } = req.params
     const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
-    if (!config.channels?.line) return res.status(404).json({ error: 'LINE not configured' })
-    delete config.channels.line
-    // ลบ route binding LINE ออกด้วย
+    const line = config.channels?.line
+    if (!line) return res.status(404).json({ error: 'LINE not configured' })
+
+    if (line.accounts?.[accountId]) {
+      delete line.accounts[accountId]
+      if (Object.keys(line.accounts).length === 0) delete line.accounts
+    } else if (accountId === 'default' && line.channelAccessToken) {
+      // format เก่า top-level
+      delete line.channelAccessToken
+      delete line.channelSecret
+    } else {
+      return res.status(404).json({ error: `Account "${accountId}" not found` })
+    }
+
+    // ถ้าไม่มี account เหลือ ลบ line channel ออก
+    const hasAccounts = line.accounts && Object.keys(line.accounts).length > 0
+    const hasTopLevel = !!line.channelAccessToken
+    if (!hasAccounts && !hasTopLevel) {
+      delete config.channels.line
+    }
+
+    // ลบ route binding ของ account นี้
     config.bindings = (config.bindings || []).filter(
-      b => !(b.type === 'route' && b.match?.channel === 'line')
+      b => !(b.type === 'route' && b.match?.channel === 'line' && b.match?.accountId === accountId)
     )
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2))
     res.json({ ok: true })
@@ -725,30 +779,32 @@ app.delete('/api/line/accounts', (req, res) => {
   }
 })
 
-// GET /api/line/bindings — route binding (LINE → agent)
+// GET /api/line/bindings — route bindings ทุก account [{ accountId, agentId }]
 app.get('/api/line/bindings', (req, res) => {
   try {
     const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
-    const route = (config.bindings || []).find(
-      b => b.type === 'route' && b.match?.channel === 'line'
-    )
-    res.json({ agentId: route?.agentId || null })
+    const routes = (config.bindings || [])
+      .filter(b => b.type === 'route' && b.match?.channel === 'line')
+      .map(b => ({ accountId: b.match.accountId, agentId: b.agentId }))
+    res.json(routes)
   } catch (e) {
     res.status(500).json({ error: e.message })
   }
 })
 
-// PUT /api/line/bindings — set route binding (LINE → agent)
+// PUT /api/line/bindings — set route binding ของ account นั้น
+// body: { accountId, agentId }
 app.put('/api/line/bindings', (req, res) => {
   try {
-    const { agentId } = req.body
+    const { accountId, agentId } = req.body
+    if (!accountId) return res.status(400).json({ error: 'accountId required' })
     const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
     if (!config.bindings) config.bindings = []
     config.bindings = config.bindings.filter(
-      b => !(b.type === 'route' && b.match?.channel === 'line')
+      b => !(b.type === 'route' && b.match?.channel === 'line' && b.match?.accountId === accountId)
     )
     if (agentId) {
-      config.bindings.push({ type: 'route', agentId, match: { channel: 'line', accountId: 'default' } })
+      config.bindings.push({ type: 'route', agentId, match: { channel: 'line', accountId } })
     }
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2))
     res.json({ ok: true })

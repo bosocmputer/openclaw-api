@@ -699,6 +699,8 @@ app.get('/api/line/botinfo', async (req, res) => {
 
 // POST /api/line/accounts — เพิ่ม LINE OA account ใหม่
 // body: { accountId, channelAccessToken, channelSecret }
+// หมายเหตุ: LINE default account ต้องอยู่ที่ top-level (channelAccessToken/channelSecret)
+//            named accounts อยู่ใน accounts.*
 app.post('/api/line/accounts', (req, res) => {
   try {
     const { accountId, channelAccessToken, channelSecret } = req.body
@@ -707,33 +709,29 @@ app.post('/api/line/accounts', (req, res) => {
     }
     const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
     if (!config.channels) config.channels = {}
-    if (!config.channels.line) config.channels.line = { enabled: true }
-
-    // migrate จาก format เก่า (top-level token) → accounts.default
+    if (!config.channels.line) config.channels.line = { enabled: true, dmPolicy: 'pairing', groupPolicy: 'disabled' }
     const line = config.channels.line
-    if (line.channelAccessToken && !line.accounts?.['default']) {
-      if (!line.accounts) line.accounts = {}
-      line.accounts['default'] = {
-        enabled: true,
-        channelAccessToken: line.channelAccessToken,
-        channelSecret: line.channelSecret || '',
-        dmPolicy: line.dmPolicy || 'pairing',
-        groupPolicy: line.groupPolicy || 'disabled',
-      }
-      delete line.channelAccessToken
-      delete line.channelSecret
-    }
 
-    if (!line.accounts) line.accounts = {}
-    if (line.accounts[accountId]) {
-      return res.status(400).json({ error: `Account "${accountId}" already exists` })
-    }
-    line.accounts[accountId] = {
-      enabled: true,
-      channelAccessToken,
-      channelSecret,
-      dmPolicy: 'pairing',
-      groupPolicy: 'disabled',
+    if (accountId === 'default') {
+      // default → top-level token
+      if (line.channelAccessToken) {
+        return res.status(400).json({ error: 'Default LINE OA already configured. Delete first.' })
+      }
+      line.channelAccessToken = channelAccessToken
+      line.channelSecret = channelSecret
+    } else {
+      // named account → accounts.*
+      if (!line.accounts) line.accounts = {}
+      if (line.accounts[accountId]) {
+        return res.status(400).json({ error: `Account "${accountId}" already exists` })
+      }
+      line.accounts[accountId] = {
+        enabled: true,
+        channelAccessToken,
+        channelSecret,
+        dmPolicy: 'pairing',
+        groupPolicy: 'disabled',
+      }
     }
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2))
     res.json({ ok: true })
@@ -750,18 +748,19 @@ app.delete('/api/line/accounts/:accountId', (req, res) => {
     const line = config.channels?.line
     if (!line) return res.status(404).json({ error: 'LINE not configured' })
 
-    if (line.accounts?.[accountId]) {
-      delete line.accounts[accountId]
-      if (Object.keys(line.accounts).length === 0) delete line.accounts
-    } else if (accountId === 'default' && line.channelAccessToken) {
-      // format เก่า top-level
+    if (accountId === 'default') {
+      // default → ลบ top-level token
+      if (!line.channelAccessToken) return res.status(404).json({ error: 'Default LINE OA not found' })
       delete line.channelAccessToken
       delete line.channelSecret
     } else {
-      return res.status(404).json({ error: `Account "${accountId}" not found` })
+      // named account → ลบจาก accounts.*
+      if (!line.accounts?.[accountId]) return res.status(404).json({ error: `Account "${accountId}" not found` })
+      delete line.accounts[accountId]
+      if (Object.keys(line.accounts).length === 0) delete line.accounts
     }
 
-    // ถ้าไม่มี account เหลือ ลบ line channel ออก
+    // ถ้าไม่มี account เหลือเลย ลบ line channel ออก
     const hasAccounts = line.accounts && Object.keys(line.accounts).length > 0
     const hasTopLevel = !!line.channelAccessToken
     if (!hasAccounts && !hasTopLevel) {

@@ -703,7 +703,7 @@ app.get('/api/line/botinfo', async (req, res) => {
 //            named accounts อยู่ใน accounts.*
 app.post('/api/line/accounts', (req, res) => {
   try {
-    const { accountId, channelAccessToken, channelSecret } = req.body
+    const { accountId, channelAccessToken, channelSecret, webhookPath } = req.body
     if (!accountId || !channelAccessToken || !channelSecret) {
       return res.status(400).json({ error: 'accountId, channelAccessToken and channelSecret required' })
     }
@@ -719,19 +719,22 @@ app.post('/api/line/accounts', (req, res) => {
       }
       line.channelAccessToken = channelAccessToken
       line.channelSecret = channelSecret
+      if (webhookPath) line.webhookPath = webhookPath
     } else {
       // named account → accounts.*
       if (!line.accounts) line.accounts = {}
       if (line.accounts[accountId]) {
         return res.status(400).json({ error: `Account "${accountId}" already exists` })
       }
-      line.accounts[accountId] = {
+      const acc = {
         enabled: true,
         channelAccessToken,
         channelSecret,
         dmPolicy: 'pairing',
         groupPolicy: 'disabled',
       }
+      if (webhookPath) acc.webhookPath = webhookPath
+      line.accounts[accountId] = acc
     }
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2))
     res.json({ ok: true })

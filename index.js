@@ -644,6 +644,151 @@ app.put('/api/telegram/bindings', (req, res) => {
   }
 })
 
+// ─── LINE ──────────────────────────────────────────────────────────────────────
+
+// GET /api/line/botinfo — ดึงชื่อ bot จาก LINE API
+app.get('/api/line/botinfo', async (req, res) => {
+  try {
+    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
+    const line = config.channels?.line || {}
+    const token = line.channelAccessToken || ''
+    if (!token) return res.json({ displayName: null, pictureUrl: null, basicId: null })
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 5000)
+    try {
+      const r = await fetch('https://api.line.me/v2/bot/info', {
+        headers: { Authorization: `Bearer ${token}` },
+        signal: controller.signal,
+      })
+      const j = await r.json()
+      if (!r.ok) return res.status(400).json({ error: j.message || 'LINE API error' })
+      res.json({ displayName: j.displayName, pictureUrl: j.pictureUrl, basicId: j.basicId })
+    } finally {
+      clearTimeout(timer)
+    }
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// GET /api/line — อ่าน LINE config ปัจจุบัน
+app.get('/api/line', (req, res) => {
+  try {
+    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
+    const line = config.channels?.line || null
+    res.json({ line })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// POST /api/line/accounts — เพิ่ม LINE OA (token + secret)
+app.post('/api/line/accounts', (req, res) => {
+  try {
+    const { channelAccessToken, channelSecret } = req.body
+    if (!channelAccessToken || !channelSecret) {
+      return res.status(400).json({ error: 'channelAccessToken and channelSecret required' })
+    }
+    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
+    if (!config.channels) config.channels = {}
+    if (config.channels.line?.channelAccessToken) {
+      return res.status(400).json({ error: 'LINE OA already configured. Delete first.' })
+    }
+    config.channels.line = {
+      enabled: true,
+      channelAccessToken,
+      channelSecret,
+      dmPolicy: 'pairing',
+      groupPolicy: 'disabled',
+    }
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2))
+    res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// DELETE /api/line/accounts — ลบ LINE OA
+app.delete('/api/line/accounts', (req, res) => {
+  try {
+    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
+    if (!config.channels?.line) return res.status(404).json({ error: 'LINE not configured' })
+    delete config.channels.line
+    // ลบ route binding LINE ออกด้วย
+    config.bindings = (config.bindings || []).filter(
+      b => !(b.type === 'route' && b.match?.channel === 'line')
+    )
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2))
+    res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// GET /api/line/bindings — route binding (LINE → agent)
+app.get('/api/line/bindings', (req, res) => {
+  try {
+    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
+    const route = (config.bindings || []).find(
+      b => b.type === 'route' && b.match?.channel === 'line'
+    )
+    res.json({ agentId: route?.agentId || null })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// PUT /api/line/bindings — set route binding (LINE → agent)
+app.put('/api/line/bindings', (req, res) => {
+  try {
+    const { agentId } = req.body
+    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
+    if (!config.bindings) config.bindings = []
+    config.bindings = config.bindings.filter(
+      b => !(b.type === 'route' && b.match?.channel === 'line')
+    )
+    if (agentId) {
+      config.bindings.push({ type: 'route', agentId, match: { channel: 'line', accountId: 'default' } })
+    }
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2))
+    res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// GET /api/line/pending — รายการ pairing รอ approve
+app.get('/api/line/pending', (req, res) => {
+  try {
+    const pendingPath = path.join(HOME, '.openclaw/credentials/line-pairing.json')
+    if (!fs.existsSync(pendingPath)) return res.json([])
+    const data = JSON.parse(fs.readFileSync(pendingPath, 'utf8'))
+    const now = Date.now()
+    const pending = Object.entries(data)
+      .filter(([, v]) => v.expiresAt > now)
+      .map(([code, v]) => ({ code, senderId: v.id, createdAt: v.createdAt, expiresAt: v.expiresAt }))
+    res.json(pending)
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// POST /api/line/approve — approve pairing code
+app.post('/api/line/approve', (req, res) => {
+  const { code } = req.body
+  if (!code) return res.status(400).json({ error: 'code required' })
+  exec(
+    `openclaw pairing approve line ${code} --notify`,
+    execOpts,
+    (err, stdout, stderr) => {
+      if (err) return res.status(500).json({ error: stderr || err.message })
+      res.json({ ok: true, output: stdout })
+    }
+  )
+})
+
+// ─── MODEL ─────────────────────────────────────────────────────────────────────
+
 // GET /api/model — อ่าน model ปัจจุบัน
 app.get('/api/model', (req, res) => {
   try {

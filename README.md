@@ -22,7 +22,7 @@ openclaw-api (port 4000)
 openclaw-gateway (agent runtime)
     │ HTTP POST /call — direct (ไม่ผ่าน mcporter exec)
     ▼
-SML MCP Connect (port 3002)
+SML MCP Connect (port 3002 by default)
     │
     └── PostgreSQL ERP Database
 ```

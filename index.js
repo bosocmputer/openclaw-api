@@ -119,7 +119,11 @@ function generateSoulTemplate(_workspace, accessMode = 'general', mcpUrl = null)
 
 5. แจ้ง user ว่ารับรายการแล้ว กรุณายืนยันกับเจ้าหน้าที่ฝ่ายขายเพื่อดำเนินการออเดอร์ต่อไป
 
-ระบบรองรับการรับรายการสินค้าและตรวจสอบข้อมูล แต่การออเดอร์จริงจะดำเนินการโดยเจ้าหน้าที่`,
+ระบบรองรับการรับรายการสินค้าและตรวจสอบข้อมูล แต่การออเดอร์จริงจะดำเนินการโดยเจ้าหน้าที่
+
+## เทคนิคการค้นหาสินค้า
+- ถ้าค้นด้วย keyword เดียว (เช่น "KOTTO หลอดไฟ") แล้วไม่พบ ให้ลองค้นแยก keyword : ครั้งที่ 1 ค้น "KOTTO" → ครั้งที่ 2 ค้น "หลอดไฟ" แล้วกรองผลจาก brand ที่ระบุ
+- ถ้าผลลัพธ์มากกว่า 5 รายการ ให้แสดง 5 รายการแรก และบอก user ว่ายังมีอีก พร้อมถามว่าต้องการค้นหาเพิ่มเติมไหม`,
     general: '',
   }
 
@@ -1712,10 +1716,10 @@ app.get('/api/monitor/events', async (_req, res) => {
           if (msg.role === 'user') {
             const c = msg.content
             let text = ''
-            if (typeof c === 'string') text = stripGatewayMetadata(c).slice(0, 300)
+            if (typeof c === 'string') text = stripGatewayMetadata(c)
             else if (Array.isArray(c)) {
               const t = c.find(x => x.type === 'text')
-              if (t) text = stripGatewayMetadata(t.text).slice(0, 300)
+              if (t) text = stripGatewayMetadata(t.text)
             }
             if (text) events.push({ ts: tsFormatted, type: 'message', text })
           } else if (msg.role === 'assistant') {
@@ -1723,24 +1727,24 @@ app.get('/api/monitor/events', async (_req, res) => {
             if (Array.isArray(c)) {
               for (const item of c) {
                 if (item.type === 'thinking') {
-                  events.push({ ts: tsFormatted, type: 'thinking', text: (item.thinking || '').slice(0, 300) })
+                  events.push({ ts: tsFormatted, type: 'thinking', text: (item.thinking || '') })
                 } else if (item.type === 'tool_use') {
-                  const toolText = item.name + (item.input ? ': ' + JSON.stringify(item.input).slice(0, 300) : '')
+                  const toolText = item.name + (item.input ? ': ' + JSON.stringify(item.input, null, 2) : '')
                   events.push({ ts: tsFormatted, type: 'tool', text: toolText })
                 } else if (item.type === 'text' && item.text) {
                   // Check for bash/exec mentions
                   const lower = item.text.toLowerCase()
                   if (lower.includes('bash') || lower.includes('exec')) {
-                    events.push({ ts: tsFormatted, type: 'tool', text: item.text.slice(0, 300) })
+                    events.push({ ts: tsFormatted, type: 'tool', text: item.text })
                   } else {
-                    events.push({ ts: tsFormatted, type: 'reply', text: item.text.slice(0, 300) })
+                    events.push({ ts: tsFormatted, type: 'reply', text: item.text })
                   }
                 } else if (item.type === 'error') {
-                  events.push({ ts: tsFormatted, type: 'error', text: (item.text || JSON.stringify(item)).slice(0, 300) })
+                  events.push({ ts: tsFormatted, type: 'error', text: (item.text || JSON.stringify(item, null, 2)).slice(0, 5000) })
                 }
               }
             } else if (typeof c === 'string') {
-              events.push({ ts: tsFormatted, type: 'reply', text: c.slice(0, 300) })
+              events.push({ ts: tsFormatted, type: 'reply', text: c })
             }
           }
         }

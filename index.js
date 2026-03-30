@@ -931,70 +931,6 @@ app.get('/api/gateway/logs', (req, res) => {
   }
 })
 
-// GET /api/agents/:id/sessions — รายการ sessions ของ agent
-app.get('/api/agents/:id/sessions', (req, res) => {
-  try {
-    const sessionsPath = path.join(HOME, `.openclaw/agents/${req.params.id}/sessions/sessions.json`)
-    if (!fs.existsSync(sessionsPath)) return res.json([])
-    const raw = JSON.parse(fs.readFileSync(sessionsPath, 'utf8'))
-    const sessions = Object.values(raw).map(s => ({
-      sessionId: s.sessionId,
-      userLabel: s.origin?.label || '',
-      userFrom: s.origin?.from || '',
-      updatedAt: s.updatedAt,
-      inputTokens: s.inputTokens || 0,
-      outputTokens: s.outputTokens || 0,
-      totalTokens: s.totalTokens || 0,
-    }))
-    sessions.sort((a, b) => b.updatedAt - a.updatedAt)
-    res.json(sessions)
-  } catch (e) {
-    res.status(500).json({ error: e.message })
-  }
-})
-
-// GET /api/agents/:id/sessions/:sessionId — messages ของ session
-app.get('/api/agents/:id/sessions/:sessionId', (req, res) => {
-  try {
-    const filePath = path.join(HOME, `.openclaw/agents/${req.params.id}/sessions/${req.params.sessionId}.jsonl`)
-    if (!fs.existsSync(filePath)) return res.json([])
-    const lines = fs.readFileSync(filePath, 'utf8').split('\n').filter(Boolean)
-    const messages = []
-    for (const line of lines) {
-      try {
-        const obj = JSON.parse(line)
-        if (obj.type !== 'message') continue
-        const text = (obj.message?.content || [])
-          .filter(c => c.type === 'text')
-          .map(c => c.text)
-          .join('')
-        if (!text) continue
-        // parse sender_id และ sender name จาก metadata block ใน user messages
-        let senderId = null
-        let senderName = null
-        if (obj.message.role === 'user') {
-          const senderMatch = text.match(/"sender_id"\s*:\s*"(\d+)"/)
-          if (senderMatch) senderId = senderMatch[1]
-          const nameMatch = text.match(/"name"\s*:\s*"([^"]+)"/)
-          if (nameMatch) senderName = nameMatch[1]
-        }
-        messages.push({
-          id: obj.id,
-          timestamp: obj.timestamp,
-          role: obj.message.role,
-          text,
-          senderId,
-          senderName,
-        })
-      } catch {}
-    }
-    messages.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp))
-    res.json(messages)
-  } catch (e) {
-    res.status(500).json({ error: e.message })
-  }
-})
-
 // GET /api/doctor/status — เช็ค config valid/invalid
 app.get('/api/doctor/status', (req, res) => {
   exec('openclaw doctor', { ...execOpts, timeout: 15000 }, (err, stdout, stderr) => {
@@ -1599,6 +1535,12 @@ app.get('/api/monitor/events', async (_req, res) => {
           const parts = key.split(':')
           const telegramIdx = parts.findIndex(p => p === 'telegram')
           user = parts.slice(telegramIdx + 1).join(':')
+        } else if (key.includes(':line:')) {
+          channel = 'line'
+          // key format: agent:sale:line:direct:uXXXX
+          const parts = key.split(':')
+          const lineIdx = parts.findIndex(p => p === 'line')
+          user = parts.slice(lineIdx + 1).join(':')
         } else {
           continue
         }

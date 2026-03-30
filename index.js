@@ -1600,8 +1600,8 @@ app.get('/api/monitor/events', async (_req, res) => {
         const normalized = parsedLines.map(entry => {
           if (!entry) return null
           if (entry.message && entry.message.role) {
-            // wrapped format: {type, id, timestamp, message:{role,content}}
-            return { role: entry.message.role, content: entry.message.content, timestamp: entry.timestamp, usage: entry.usage }
+            // wrapped format: {type, id, timestamp, message:{role,content,usage}}
+            return { role: entry.message.role, content: entry.message.content, timestamp: entry.timestamp, usage: entry.message.usage ?? entry.usage, model: entry.message.model, stopReason: entry.message.stopReason }
           }
           // flat format: {role, content, timestamp}
           return entry
@@ -1684,12 +1684,16 @@ app.get('/api/monitor/events', async (_req, res) => {
 
         // Count cost and today messages
         let sessionCost = 0
+        let sessionInputTokens = 0
+        let sessionOutputTokens = 0
         for (const msg of filtered) {
           if (msg.usage) {
             const u = msg.usage
-            const inputCost = ((u.input_tokens || 0) / 1000000) * 3
-            const outputCost = ((u.output_tokens || 0) / 1000000) * 15
-            sessionCost += inputCost + outputCost
+            const inp = u.input || u.input_tokens || 0
+            const out = u.output || u.output_tokens || 0
+            sessionInputTokens += inp
+            sessionOutputTokens += out
+            sessionCost += u.cost?.total ? u.cost.total : ((inp / 1000000) * 3 + (out / 1000000) * 15)
           }
           // Count today's messages
           const ts = msg.timestamp || msg.ts
@@ -1709,12 +1713,15 @@ app.get('/api/monitor/events', async (_req, res) => {
           }
         }
 
-        // Build events array from last 50 filtered lines
+        // Build events array from messages (with latency, token usage, and tool result pairing)
         const events = []
+        let lastUserTsMs = null
         for (const msg of filtered) {
-          const ts = msg.timestamp || msg.ts
-          const tsFormatted = ts ? new Date(ts).toISOString().slice(11, 19) : null
+          const msgTs = msg.timestamp || msg.ts
+          const tsFormatted = msgTs ? new Date(msgTs).toISOString().slice(11, 19) : null
+          const usage = msg.usage
           if (msg.role === 'user') {
+            lastUserTsMs = msgTs ? new Date(msgTs).getTime() : null
             const c = msg.content
             let text = ''
             if (typeof c === 'string') text = stripGatewayMetadata(c)
@@ -1729,23 +1736,59 @@ app.get('/api/monitor/events', async (_req, res) => {
               for (const item of c) {
                 if (item.type === 'thinking') {
                   events.push({ ts: tsFormatted, type: 'thinking', text: (item.thinking || '') })
-                } else if (item.type === 'tool_use') {
-                  const toolText = item.name + (item.input ? ': ' + JSON.stringify(item.input, null, 2) : '')
-                  events.push({ ts: tsFormatted, type: 'tool', text: toolText })
+                } else if (item.type === 'tool_use' || item.type === 'toolCall') {
+                  const toolName = item.name || ''
+                  const toolText = toolName + (item.input ? ': ' + JSON.stringify(item.input, null, 2) : '')
+                  events.push({ ts: tsFormatted, type: 'tool', text: toolText, toolName })
                 } else if (item.type === 'text' && item.text) {
-                  // Check for bash/exec mentions
                   const lower = item.text.toLowerCase()
                   if (lower.includes('bash') || lower.includes('exec')) {
                     events.push({ ts: tsFormatted, type: 'tool', text: item.text })
                   } else {
-                    events.push({ ts: tsFormatted, type: 'reply', text: item.text })
+                    const ev = { ts: tsFormatted, type: 'reply', text: item.text }
+                    if (lastUserTsMs && msgTs) {
+                      const diff = (new Date(msgTs).getTime() - lastUserTsMs) / 1000
+                      if (diff > 0 && diff < 3600) ev.latency = Math.round(diff * 10) / 10
+                    }
+                    if (usage) {
+                      ev.inputTokens = usage.input || usage.input_tokens || 0
+                      ev.outputTokens = usage.output || usage.output_tokens || 0
+                      ev.cost = usage.cost?.total ?? 0
+                    }
+                    events.push(ev)
+                    lastUserTsMs = null
                   }
                 } else if (item.type === 'error') {
                   events.push({ ts: tsFormatted, type: 'error', text: (item.text || JSON.stringify(item, null, 2)).slice(0, 5000) })
                 }
               }
             } else if (typeof c === 'string') {
-              events.push({ ts: tsFormatted, type: 'reply', text: c })
+              const ev = { ts: tsFormatted, type: 'reply', text: c }
+              if (lastUserTsMs && msgTs) {
+                const diff = (new Date(msgTs).getTime() - lastUserTsMs) / 1000
+                if (diff > 0 && diff < 3600) ev.latency = Math.round(diff * 10) / 10
+              }
+              if (usage) {
+                ev.inputTokens = usage.input || usage.input_tokens || 0
+                ev.outputTokens = usage.output || usage.output_tokens || 0
+                ev.cost = usage.cost?.total ?? 0
+              }
+              events.push(ev)
+              lastUserTsMs = null
+            }
+          } else if (msg.role === 'toolResult') {
+            // Pair tool result with last unmatched tool event
+            const c = msg.content
+            if (Array.isArray(c)) {
+              const text = c.find(x => x.type === 'text')?.text || ''
+              if (text) {
+                for (let i = events.length - 1; i >= 0; i--) {
+                  if (events[i].type === 'tool' && events[i].toolResult === undefined) {
+                    events[i].toolResult = text.slice(0, 3000)
+                    break
+                  }
+                }
+              }
             }
           }
         }
@@ -1767,6 +1810,8 @@ app.get('/api/monitor/events', async (_req, res) => {
           lastReplyText,
           elapsed: elapsedSec,
           cost: Math.round(sessionCost * 100000) / 100000,
+          inputTokens: sessionInputTokens,
+          outputTokens: sessionOutputTokens,
           events
         }
         channels[channel].push(sessionEntry)
@@ -1830,6 +1875,352 @@ app.get('/api/monitor/events', async (_req, res) => {
     res.status(500).json({ error: e.message })
   }
 })
+
+// GET /api/agents/:id/sessions — list sessions with token metadata
+app.get('/api/agents/:id/sessions', (req, res) => {
+  try {
+    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
+    const agent = config.agents?.list?.find(a => a.id === req.params.id)
+    if (!agent) return res.status(404).json({ error: 'Agent not found' })
+
+    const sessionsPath = path.join(HOME, `.openclaw/agents/${req.params.id}/sessions/sessions.json`)
+    if (!fs.existsSync(sessionsPath)) return res.json([])
+
+    const sessionsMap = JSON.parse(fs.readFileSync(sessionsPath, 'utf8'))
+    const userNames = readUserNames()
+    const result = []
+
+    for (const [key, info] of Object.entries(sessionsMap)) {
+      if (!info || !info.sessionId || key.includes(':main')) continue
+      const sessionFile = info.sessionFile
+        || path.join(HOME, `.openclaw/agents/${req.params.id}/sessions/${info.sessionId}.jsonl`)
+      if (!fs.existsSync(sessionFile)) continue
+
+      let inputTokens = 0, outputTokens = 0
+      try {
+        const lines = fs.readFileSync(sessionFile, 'utf8').trim().split('\n').filter(Boolean)
+        for (const line of lines) {
+          try {
+            const entry = JSON.parse(line)
+            const usage = entry.message?.usage ?? entry.usage
+            if (usage) {
+              inputTokens += usage.input || usage.input_tokens || 0
+              outputTokens += usage.output || usage.output_tokens || 0
+            }
+          } catch {}
+        }
+      } catch {}
+
+      let userLabel = key.replace(/^agent:[^:]+:/, '')
+      let userFrom = 'unknown'
+      if (key.includes('telegram')) userFrom = 'telegram'
+      else if (key.includes(':line:')) userFrom = 'line'
+      else if (key.includes('hook:webchat')) userFrom = 'webchat'
+
+      const peerId = info.deliveryContext?.to || info.lastTo
+      if (peerId && userNames[peerId]) userLabel = userNames[peerId]
+
+      result.push({
+        sessionId: info.sessionId,
+        sessionKey: key,
+        userLabel,
+        userFrom,
+        updatedAt: info.updatedAt || 0,
+        inputTokens,
+        outputTokens,
+        totalTokens: inputTokens + outputTokens,
+      })
+    }
+
+    result.sort((a, b) => b.updatedAt - a.updatedAt)
+    res.json(result)
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// GET /api/agents/:id/sessions/:sessionId — full session replay
+app.get('/api/agents/:id/sessions/:sessionId', (req, res) => {
+  try {
+    const { id, sessionId } = req.params
+    const sessionFile = path.join(HOME, `.openclaw/agents/${id}/sessions/${sessionId}.jsonl`)
+    if (!fs.existsSync(sessionFile)) return res.status(404).json({ error: 'Session not found' })
+
+    const lines = fs.readFileSync(sessionFile, 'utf8').trim().split('\n').filter(Boolean)
+    const messages = []
+    let totalInput = 0, totalOutput = 0, totalCost = 0
+    let lastUserTsMs = null
+    const latencies = []
+
+    for (const line of lines) {
+      try {
+        const entry = JSON.parse(line)
+        if (entry.type !== 'message' || !entry.message) continue
+        const msg = entry.message
+        const usage = msg.usage ?? entry.usage
+        const ts = entry.timestamp
+
+        if (msg.role === 'user') {
+          lastUserTsMs = ts ? new Date(ts).getTime() : null
+          const c = msg.content
+          let text = ''
+          if (typeof c === 'string') text = stripGatewayMetadata(c)
+          else if (Array.isArray(c)) text = stripGatewayMetadata(c.find(x => x.type === 'text')?.text || '')
+          messages.push({ role: 'user', timestamp: ts, text })
+        } else if (msg.role === 'assistant') {
+          const c = msg.content || []
+          const thinking = Array.isArray(c) ? (c.find(x => x.type === 'thinking')?.thinking || null) : null
+          const textParts = Array.isArray(c) ? c.filter(x => x.type === 'text').map(x => x.text) : (typeof c === 'string' ? [c] : [])
+          const toolCalls = Array.isArray(c) ? c.filter(x => x.type === 'toolCall' || x.type === 'tool_use').map(x => ({ name: x.name, input: x.input })) : []
+
+          let latency = null
+          if (lastUserTsMs && ts) {
+            const diff = (new Date(ts).getTime() - lastUserTsMs) / 1000
+            if (diff > 0 && diff < 3600) { latency = Math.round(diff * 10) / 10; latencies.push(latency) }
+          }
+
+          if (usage) {
+            totalInput += usage.input || usage.input_tokens || 0
+            totalOutput += usage.output || usage.output_tokens || 0
+            totalCost += usage.cost?.total || 0
+          }
+
+          if (textParts.length > 0 || toolCalls.length > 0 || thinking) {
+            messages.push({
+              role: 'assistant',
+              timestamp: ts,
+              thinking,
+              text: textParts.join('\n'),
+              toolCalls,
+              model: msg.model,
+              stopReason: msg.stopReason,
+              usage: usage ? {
+                input: usage.input || usage.input_tokens || 0,
+                output: usage.output || usage.output_tokens || 0,
+                cost: usage.cost?.total || 0,
+              } : null,
+              latency,
+            })
+            if (textParts.length > 0) lastUserTsMs = null
+          }
+        } else if (msg.role === 'toolResult') {
+          const c = msg.content
+          const text = Array.isArray(c) ? (c.find(x => x.type === 'text')?.text || '') : ''
+          for (let i = messages.length - 1; i >= 0; i--) {
+            const prev = messages[i]
+            if (prev.role === 'assistant' && prev.toolCalls?.length > 0) {
+              const lastTool = prev.toolCalls[prev.toolCalls.length - 1]
+              if (lastTool.result === undefined) { lastTool.result = text.slice(0, 3000); break }
+            }
+          }
+        }
+      } catch {}
+    }
+
+    const avgLatency = latencies.length
+      ? Math.round((latencies.reduce((a, b) => a + b, 0) / latencies.length) * 10) / 10 : 0
+
+    res.json({
+      sessionId,
+      agentId: id,
+      messages,
+      stats: {
+        turns: messages.filter(m => m.role === 'user').length,
+        inputTokens: totalInput,
+        outputTokens: totalOutput,
+        totalCost: Math.round(totalCost * 100000) / 100000,
+        avgLatency,
+      },
+    })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// GET /api/monitor/cost — aggregate cost per agent per day (last N days)
+app.get('/api/monitor/cost', (req, res) => {
+  try {
+    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
+    const agentList = config.agents?.list || []
+    const days = parseInt(req.query.days || '30')
+    const cutoff = new Date()
+    cutoff.setDate(cutoff.getDate() - days)
+
+    // dayData[date][agentId] = { cost, inputTokens, outputTokens, turns }
+    const dayData = {}
+
+    for (const agent of agentList) {
+      const sessionsDir = path.join(HOME, `.openclaw/agents/${agent.id}/sessions`)
+      if (!fs.existsSync(sessionsDir)) continue
+
+      const files = fs.readdirSync(sessionsDir)
+        .filter(f => f.endsWith('.jsonl') && !f.includes('.reset.'))
+
+      for (const file of files) {
+        try {
+          const content = fs.readFileSync(path.join(sessionsDir, file), 'utf8')
+          const lines = content.trim().split('\n').filter(Boolean)
+          for (const line of lines) {
+            try {
+              const entry = JSON.parse(line)
+              if (entry.message?.role !== 'assistant') continue
+              const usage = entry.message?.usage ?? entry.usage
+              if (!usage) continue
+              const ts = entry.timestamp
+              if (!ts || new Date(ts) < cutoff) continue
+
+              const date = ts.slice(0, 10)
+              if (!dayData[date]) dayData[date] = {}
+              if (!dayData[date][agent.id]) dayData[date][agent.id] = { cost: 0, inputTokens: 0, outputTokens: 0, turns: 0 }
+
+              const inp = usage.input || usage.input_tokens || 0
+              const out = usage.output || usage.output_tokens || 0
+              dayData[date][agent.id].cost += usage.cost?.total ? usage.cost.total : ((inp / 1000000) * 3 + (out / 1000000) * 15)
+              dayData[date][agent.id].inputTokens += inp
+              dayData[date][agent.id].outputTokens += out
+              dayData[date][agent.id].turns++
+            } catch {}
+          }
+        } catch {}
+      }
+    }
+
+    const sortedDates = Object.keys(dayData).sort()
+    const resultDays = sortedDates.map(date => {
+      const agents = Object.entries(dayData[date]).map(([agentId, s]) => ({
+        agentId,
+        cost: Math.round(s.cost * 100000) / 100000,
+        inputTokens: s.inputTokens,
+        outputTokens: s.outputTokens,
+        turns: s.turns,
+      })).sort((a, b) => b.cost - a.cost)
+      const total = agents.reduce((s, a) => s + a.cost, 0)
+      return { date, agents, total: Math.round(total * 100000) / 100000 }
+    })
+
+    const summaryByAgent = {}
+    for (const day of resultDays) {
+      for (const a of day.agents) {
+        summaryByAgent[a.agentId] = Math.round(((summaryByAgent[a.agentId] || 0) + a.cost) * 100000) / 100000
+      }
+    }
+
+    res.json({
+      days: resultDays,
+      summary: {
+        totalCost: Math.round(Object.values(summaryByAgent).reduce((a, b) => a + b, 0) * 100000) / 100000,
+        byAgent: summaryByAgent,
+      },
+    })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// GET /api/alerting — get alerting config
+app.get('/api/alerting', (req, res) => {
+  try {
+    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
+    res.json(config.alerting || { telegram: { enabled: false, chatId: '' } })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// PUT /api/alerting — save alerting config
+app.put('/api/alerting', (req, res) => {
+  try {
+    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
+    config.alerting = req.body
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2))
+    res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
+// ─── Error Alerting Watcher ────────────────────────────────────────────────────
+const alertState = {}
+
+async function sendTelegramAlert(botToken, chatId, text) {
+  try {
+    await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'HTML' }),
+      signal: AbortSignal.timeout(5000),
+    })
+  } catch {}
+}
+
+function runAlertCheck() {
+  let config = {}
+  try { config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) } catch { return }
+  const alertConfig = config.alerting?.telegram
+  if (!alertConfig?.enabled || !alertConfig?.chatId) return
+
+  const botToken = config.channels?.telegram?.accounts?.default?.botToken
+    || Object.values(config.channels?.telegram?.accounts || {})[0]?.botToken
+    || config.channels?.telegram?.botToken
+  if (!botToken) return
+
+  const agentList = config.agents?.list || []
+  for (const agent of agentList) {
+    const sessionsPath = path.join(HOME, `.openclaw/agents/${agent.id}/sessions/sessions.json`)
+    let sessionsMap = {}
+    try { sessionsMap = JSON.parse(fs.readFileSync(sessionsPath, 'utf8')) } catch { continue }
+
+    for (const [key, info] of Object.entries(sessionsMap)) {
+      if (!info || key.includes(':main')) continue
+      const stateKey = `${agent.id}:${key}`
+      if (!alertState[stateKey]) alertState[stateKey] = {}
+      const now = Date.now()
+      const cooldown = 300000 // 5 min per session
+
+      // Check abortedLastRun
+      if (info.abortedLastRun === true && alertState[stateKey].aborted !== true) {
+        if (now - (alertState[stateKey].lastAlert || 0) > cooldown) {
+          const label = key.replace(/^agent:[^:]+:/, '')
+          sendTelegramAlert(botToken, alertConfig.chatId,
+            `⚠️ <b>OpenClaw Alert</b>\n\nAgent: <code>${agent.id}</code>\nSession: <code>${label}</code>\n\nสถานะ: Session ถูกยกเลิกกลางคัน`)
+          alertState[stateKey].lastAlert = now
+        }
+      }
+      alertState[stateKey].aborted = info.abortedLastRun === true
+
+      // Check stopReason of last assistant message
+      const sessionFile = info.sessionFile
+        || (info.sessionId ? path.join(HOME, `.openclaw/agents/${agent.id}/sessions/${info.sessionId}.jsonl`) : null)
+      if (!sessionFile || !fs.existsSync(sessionFile)) continue
+
+      try {
+        const lines = fs.readFileSync(sessionFile, 'utf8').trim().split('\n').filter(Boolean)
+        for (let i = lines.length - 1; i >= 0; i--) {
+          const entry = JSON.parse(lines[i])
+          if (entry.type === 'message' && entry.message?.role === 'assistant' && entry.message?.stopReason) {
+            const stopReason = entry.message.stopReason
+            if (stopReason !== 'stop' && stopReason !== 'end_turn') {
+              if (alertState[stateKey].stopReason !== stopReason) {
+                if (now - (alertState[stateKey].lastAlert || 0) > cooldown) {
+                  const label = key.replace(/^agent:[^:]+:/, '')
+                  sendTelegramAlert(botToken, alertConfig.chatId,
+                    `⚠️ <b>OpenClaw Alert</b>\n\nAgent: <code>${agent.id}</code>\nSession: <code>${label}</code>\n\nหยุดผิดปกติ: <code>${stopReason}</code>`)
+                  alertState[stateKey].lastAlert = now
+                }
+                alertState[stateKey].stopReason = stopReason
+              }
+            } else {
+              alertState[stateKey].stopReason = null
+            }
+            break
+          }
+        }
+      } catch {}
+    }
+  }
+}
+
+setInterval(runAlertCheck, 60000)
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`OpenClaw API running on port ${PORT}`)

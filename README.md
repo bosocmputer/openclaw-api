@@ -116,8 +116,6 @@ pm2 restart openclaw-api
 | GET | `/api/agents/:id/users` | รายการ users ของ agent |
 | POST | `/api/agents/:id/users` | เพิ่ม user (peer binding + allowFrom อัตโนมัติ) |
 | DELETE | `/api/agents/:id/users/:userId` | ลบ user |
-| GET | `/api/agents/:id/sessions` | รายการ chat sessions |
-| GET | `/api/agents/:id/sessions/:sessionId` | messages ใน session |
 | GET | `/api/usernames` | อ่าน usernames.json |
 | GET | `/api/models` | ดึง model list จาก OpenRouter |
 | POST | `/api/gateway/restart` | รัน `openclaw gateway restart` |
@@ -143,7 +141,15 @@ pm2 restart openclaw-api
 | GET | `/api/webchat/history/:roomId` | ดึง messages ของ user ใน room |
 | POST | `/api/webchat/send` | ส่งข้อความ → hooks → poll response → บันทึก PostgreSQL |
 | GET | `/api/webchat/chat-users` | list users ที่มี role=chat |
-| GET | `/api/monitor/events` | real-time session state ทุก agent/channel |
+| GET | `/api/line` | อ่าน LINE config (channels.line) |
+| GET | `/api/line/botinfo` | ชื่อ bot จาก LINE API ต่อ account |
+| GET | `/api/line/bindings` | route bindings (OA → agent) |
+| PUT | `/api/line/bindings` | set route binding |
+| POST | `/api/line/accounts` | เพิ่ม LINE OA (accountId, channelAccessToken, channelSecret, webhookPath) |
+| DELETE | `/api/line/accounts/:id` | ลบ LINE OA |
+| GET | `/api/line/pending` | รายการรอ pairing |
+| POST | `/api/line/approve` | approve pairing code |
+| GET | `/api/monitor/events` | real-time session state ทุก agent/channel (telegram/line/webchat) |
 
 ## Authentication
 
@@ -169,6 +175,7 @@ Authorization: Bearer <API_TOKEN>
 - **SOUL.md template (v2)** — AI เรียก MCP ผ่าน `curl POST /call` โดยตรง ไม่ใช้ mcporter exec — URL derive จาก mcporter.json อัตโนมัติ (แทนที่ `/sse` ด้วย `/call`)
 - **mcporter.json** — ยังคงใช้อยู่สำหรับ URL และ `mcp-access-mode` header — `POST /api/agents/:id/mcp/test` ยังรัน `mcporter list` เพื่อ verify tools
 - **`/api/monitor/events`** — อ่าน `.jsonl` files last 50 lines ต่อ session, `ts` field = UTC HH:MM:SS (ต้อง +7h บน client เพื่อแสดงเวลาไทย), กรอง: webchat sessions ที่ไม่มี room ใน DB + sessions ที่ไม่มี activity >3 วัน, `stripGatewayMetadata()` ตัด Telegram metadata + Webchat SECURITY NOTICE headers จาก user text
-
-
-
+- **LINE webhookPath ต้องไม่ซ้ำกัน** — `registerPluginHttpRoute` ใช้ `replaceExisting:true` → ถ้า 2 OA ใช้ path เดียวกัน OA แรกได้ 401
+- **LINE session key**: `agent:<agentId>:line:direct:<lineUserId>` เช่น `agent:sale:line:direct:u6490df71c89c6db1b51c7084b46055ef`
+- **LINE channel** parse จาก session key: contains `':line:'` → channel='line'
+- **cloudflared**: LINE webhook ต้องการ HTTPS — expose port 18789 ด้วย `cloudflared tunnel --url http://localhost:18789`

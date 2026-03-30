@@ -806,40 +806,23 @@ app.post('/api/agents/:id/mcp/test', (req, res) => {
     const serverName = Object.keys(mcpConfig.mcpServers ?? {})[0]
     if (!serverName) return res.status(400).json({ error: 'No MCP server configured' })
 
-    // ถ้า UI ส่ง accessMode มา ให้เขียน temp config โดย override headers["mcp-access-mode"]
     const overrideMode = req.body?.accessMode
-    let configPathToUse = mcpPath
-    let tempPath = null
-    if (overrideMode) {
-      const tempConfig = JSON.parse(JSON.stringify(mcpConfig))
-      if (!tempConfig.mcpServers[serverName].headers) tempConfig.mcpServers[serverName].headers = {}
-      tempConfig.mcpServers[serverName].headers['mcp-access-mode'] = overrideMode
-      tempPath = mcpPath + '.test.tmp'
-      fs.writeFileSync(tempPath, JSON.stringify(tempConfig, null, 2))
-      configPathToUse = tempPath
-    }
-
     const effectiveMode = overrideMode ?? mcpConfig.mcpServers[serverName]?.headers?.['mcp-access-mode'] ?? 'general'
-    const cmd = `mcporter list --config "${configPathToUse}" ${serverName} --json`
-    exec(cmd, { timeout: 15000 }, (err, stdout, stderr) => {
-      if (tempPath && fs.existsSync(tempPath)) fs.unlinkSync(tempPath)
-      if (err) return res.status(500).json({ error: stderr || err.message, raw: stdout })
-      try {
-        const result = JSON.parse(stdout)
-        const list = Array.isArray(result) ? result : (result.tools ?? [])
+
+    // Derive base URL from server URL (strip /call or /sse path suffix)
+    const serverUrl = mcpConfig.mcpServers[serverName]?.url ?? ''
+    const baseUrl = serverUrl.replace(/\/(call|sse)(\/.*)?$/, '')
+    if (!baseUrl) return res.status(400).json({ error: 'MCP server URL not configured' })
+    const toolsUrl = `${baseUrl}/tools`
+
+    fetch(toolsUrl, { headers: { 'mcp-access-mode': effectiveMode } })
+      .then(r => r.json())
+      .then(data => {
+        const list = Array.isArray(data) ? data : (data.tools ?? [])
         const tools = list.map(t => ({ name: t.name, description: t.description ?? '' }))
         res.json({ ok: true, serverName, accessMode: effectiveMode, tools })
-      } catch {
-        // fallback: parse human-readable format
-        const tools = []
-        const lines = stdout.split('\n')
-        for (const line of lines) {
-          const match = line.match(/^\s+function\s+(\w+)/)
-          if (match) tools.push({ name: match[1], description: '' })
-        }
-        res.json({ ok: true, serverName, accessMode: effectiveMode, tools, raw: tools.length === 0 ? stdout : undefined })
-      }
-    })
+      })
+      .catch(err => res.status(500).json({ error: err.message }))
   } catch (e) {
     res.status(500).json({ error: e.message })
   }

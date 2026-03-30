@@ -143,6 +143,7 @@ pm2 restart openclaw-api
 | GET | `/api/webchat/history/:roomId` | ดึง messages ของ user ใน room |
 | POST | `/api/webchat/send` | ส่งข้อความ → hooks → poll response → บันทึก PostgreSQL |
 | GET | `/api/webchat/chat-users` | list users ที่มี role=chat |
+| GET | `/api/monitor/events` | real-time session state ทุก agent/channel |
 
 ## Authentication
 
@@ -167,6 +168,7 @@ Authorization: Bearer <API_TOKEN>
 - **PostgreSQL constraint** — `admin_users_role_check` รองรับ role: `superadmin`, `admin`, `chat` (ไม่มี `viewer` แล้ว)
 - **SOUL.md template (v2)** — AI เรียก MCP ผ่าน `curl POST /call` โดยตรง ไม่ใช้ mcporter exec — URL derive จาก mcporter.json อัตโนมัติ (แทนที่ `/sse` ด้วย `/call`)
 - **mcporter.json** — ยังคงใช้อยู่สำหรับ URL และ `mcp-access-mode` header — `POST /api/agents/:id/mcp/test` ยังรัน `mcporter list` เพื่อ verify tools
+- **`/api/monitor/events`** — อ่าน `.jsonl` files last 50 lines ต่อ session, `ts` field = UTC HH:MM:SS (ต้อง +7h บน client เพื่อแสดงเวลาไทย), กรอง: webchat sessions ที่ไม่มี room ใน DB + sessions ที่ไม่มี activity >3 วัน, `stripGatewayMetadata()` ตัด Telegram metadata + Webchat SECURITY NOTICE headers จาก user text
 
 
 

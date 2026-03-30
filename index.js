@@ -28,16 +28,16 @@ function generateSoulTemplate(_workspace, accessMode = 'general', mcpUrl = null)
 
   const roleDescriptions = {
     admin:    'ผู้ช่วย AI สำหรับผู้บริหาร — เข้าถึงข้อมูลได้ทุกส่วน รวมถึงรายงานและการวิเคราะห์',
-    sales:    'ผู้ช่วย AI ฝ่ายขาย — ดูข้อมูลลูกค้า สินค้า ราคา สต็อก ยอดค้างส่ง และรายงานยอดขาย',
+    sales:    'ผู้ช่วย AI ฝ่ายขาย — ดูข้อมูลลูกค้า สินค้า ราคา สต็อก และยอดค้างส่ง',
     purchase: 'ผู้ช่วย AI ฝ่ายจัดซื้อ — ดูข้อมูลผู้จำหน่าย สินค้า สต็อก และยอดค้างรับ',
     stock:    'ผู้ช่วย AI ฝ่ายคลังสินค้า — ดูสต็อก ยอดค้างรับ ค้างส่ง และค้างจอง',
-    general:  'ผู้ช่วย AI ทั่วไป — ค้นหาข้อมูลสินค้า ลูกค้า และสต็อก',
+    general:  'ผู้ช่วย AI ทั่วไป — ค้นหาข้อมูลสินค้าและตรวจสอบสต็อก',
   }
 
   const roleTools = {
     admin: `## Tools ที่ใช้ได้
-- search_product                  — ค้นหาสินค้า
 - search_customer                 — ค้นหาลูกค้า
+- search_product                  — ค้นหาสินค้า
 - search_supplier                 — ค้นหาผู้จำหน่าย
 - get_stock_balance               — ยอดคงเหลือสินค้า
 - get_product_price               — ราคาสินค้า
@@ -49,10 +49,10 @@ function generateSoulTemplate(_workspace, accessMode = 'general', mcpUrl = null)
 - get_sales_by_salesman           — ยอดขายแยกตามพนักงานขาย
 - get_sales_by_branch             — ยอดขายแยกตามสาขา
 - get_sales_by_dimension          — ยอดขายแยกตามมิติ (แผนก/ฝ่าย/โครงการ/งาน)
-- get_sales_by_item               — ยอดขายแยกตามสินค้า
-- get_sales_by_area               — ยอดขายแยกตามพื้นที่/จังหวัด
 - get_document_summary            — สรุปข้อมูลเอกสารขาย
 - get_sales_item_detail           — รายละเอียดสินค้าในใบขาย + กำไร/ขาดทุน
+- get_sales_by_item               — ยอดขายแยกตามสินค้า
+- get_sales_by_area               — ยอดขายแยกตามพื้นที่/จังหวัด
 - get_item_top_buyers             — ลูกค้าที่ซื้อสินค้านั้นเยอะที่สุด
 - get_customer_top_items          — สินค้าที่ลูกค้านั้นซื้อเยอะที่สุด
 - get_customer_rfm                — RFM Analysis จัดกลุ่มลูกค้า
@@ -69,22 +69,13 @@ function generateSoulTemplate(_workspace, accessMode = 'general', mcpUrl = null)
 - fallback_response               — แจ้งเมื่อไม่มี tool รองรับ`,
 
     sales: `## Tools ที่ใช้ได้
-- search_product               — ค้นหาสินค้า
-- search_customer              — ค้นหาลูกค้า
-- get_stock_balance            — ยอดคงเหลือสินค้า
-- get_product_price            — ราคาสินค้า
-- get_account_outstanding      — สินค้าค้างส่ง
-- get_bookout_balance          — สินค้าค้างจอง
-- get_sales_summary            — ยอดขายรวมตามช่วงเวลา (รายวัน/สัปดาห์/เดือน/ปี)
-- get_sales_by_customer        — ยอดขายแยกตามลูกค้า
-- get_sales_by_salesman        — ยอดขายแยกตามพนักงานขาย
-- get_sales_by_item            — ยอดขายแยกตามสินค้า
-- get_document_summary         — สรุปข้อมูลเอกสารขาย
-- get_sales_item_detail        — รายละเอียดสินค้าในใบขาย + กำไร/ขาดทุน
-- get_item_top_buyers          — ลูกค้าที่ซื้อสินค้านั้นเยอะที่สุด
-- get_customer_top_items       — สินค้าที่ลูกค้านั้นซื้อเยอะที่สุด
-- get_customer_activity_status — สถานะการซื้อ Active/Dormant/Lost/Never
-- fallback_response            — แจ้งเมื่อไม่มี tool รองรับ`,
+- search_customer         — ค้นหาลูกค้า
+- search_product          — ค้นหาสินค้า
+- get_stock_balance       — ยอดคงเหลือสินค้า
+- get_product_price       — ราคาสินค้า
+- get_account_outstanding — สินค้าค้างส่ง
+- get_bookout_balance     — สินค้าค้างจอง
+- fallback_response       — แจ้งเมื่อไม่มี tool รองรับ`,
 
     purchase: `## Tools ที่ใช้ได้
 - search_product          — ค้นหาสินค้า
@@ -103,7 +94,6 @@ function generateSoulTemplate(_workspace, accessMode = 'general', mcpUrl = null)
 
     general: `## Tools ที่ใช้ได้
 - search_product    — ค้นหาสินค้า
-- search_customer   — ค้นหาลูกค้า
 - get_stock_balance — ยอดคงเหลือสินค้า
 - get_product_price — ราคาสินค้า
 - fallback_response — แจ้งเมื่อไม่มี tool รองรับ`,

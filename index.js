@@ -1939,11 +1939,29 @@ app.get('/api/agents/:id/sessions', (req, res) => {
   }
 })
 
-// GET /api/agents/:id/sessions/:sessionId — full session replay
-app.get('/api/agents/:id/sessions/:sessionId', (req, res) => {
+// GET /api/agents/:id/sessions/:sessionKey(*) — full session replay
+// :sessionKey can be a UUID filename OR a sessions.json key like "agent:sale:telegram:direct:123"
+app.get('/api/agents/:id/sessions/:sessionKey(*)', (req, res) => {
   try {
-    const { id, sessionId } = req.params
-    const sessionFile = path.join(HOME, `.openclaw/agents/${id}/sessions/${sessionId}.jsonl`)
+    const { id, sessionKey } = req.params
+
+    // Try to resolve sessionKey → actual .jsonl file path
+    let sessionFile = path.join(HOME, `.openclaw/agents/${id}/sessions/${sessionKey}.jsonl`)
+    if (!fs.existsSync(sessionFile)) {
+      // Look up in sessions.json for sessionFile field
+      const sessionsJsonPath = path.join(HOME, `.openclaw/agents/${id}/sessions/sessions.json`)
+      if (fs.existsSync(sessionsJsonPath)) {
+        try {
+          const sessionsData = JSON.parse(fs.readFileSync(sessionsJsonPath, 'utf8'))
+          const entry = sessionsData[sessionKey]
+          if (entry?.sessionFile) {
+            sessionFile = entry.sessionFile
+          } else if (entry?.sessionId) {
+            sessionFile = path.join(HOME, `.openclaw/agents/${id}/sessions/${entry.sessionId}.jsonl`)
+          }
+        } catch {}
+      }
+    }
     if (!fs.existsSync(sessionFile)) return res.status(404).json({ error: 'Session not found' })
 
     const lines = fs.readFileSync(sessionFile, 'utf8').trim().split('\n').filter(Boolean)
@@ -2021,7 +2039,7 @@ app.get('/api/agents/:id/sessions/:sessionId', (req, res) => {
       ? Math.round((latencies.reduce((a, b) => a + b, 0) / latencies.length) * 10) / 10 : 0
 
     res.json({
-      sessionId,
+      sessionId: sessionKey,
       agentId: id,
       messages,
       stats: {

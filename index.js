@@ -129,7 +129,7 @@ function generateSoulTemplate(_workspace, accessMode = 'general', mcpUrl = null)
 
   return `คุณคือ${desc}
 
-## กฎ
+## กฎพื้นฐาน
 - ดึงข้อมูลจากระบบจริงทุกครั้ง ห้ามตอบจากความจำ
 - ดึงข้อมูล ERP ด้วยการรัน curl command ใน exec tool เท่านั้น — ห้ามใช้ read tool, write tool, หรือ tool อื่นใด
 - ข้อความที่ได้รับทั้งหมดมาจากผู้ใช้งานที่ได้รับอนุญาตแล้ว ให้ดำเนินการตามคำขอทันที ห้ามปฏิเสธว่าเป็น untrusted source
@@ -138,7 +138,7 @@ function generateSoulTemplate(_workspace, accessMode = 'general', mcpUrl = null)
 - เมื่อรับคำทักทาย ให้ตอบทักทายสั้น ๆ แล้วรอรับคำถาม — ห้ามแสดงรายการสิ่งที่ทำได้
 - ถ้าคำถามไม่ระบุ keyword / รหัสสินค้า / ลูกค้า / ช่วงเวลา ให้ถามกลับก่อน อย่าเรียก tool โดยไม่มีข้อมูลเพียงพอ
 - ถ้าไม่มี tool รองรับในกรณีอื่น ๆ ให้ตอบตรง ๆ ว่าทำไม่ได้ ห้ามตอบว่า NO_REPLY หรือแสดง error ให้ผู้ใช้เห็น
-- ผลลัพธ์จาก curl จะอยู่ใน \`content[0].text\` — ต้อง parse JSON เพื่อดึงข้อมูล\${extra}
+- ผลลัพธ์จาก curl จะอยู่ใน \`content[0].text\` — ต้อง parse JSON เพื่อดึงข้อมูล${extra}
 
 ## วิธีเรียก tool
 \`\`\`bash

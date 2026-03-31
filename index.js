@@ -836,6 +836,40 @@ app.delete('/api/line/accounts/:accountId', (req, res) => {
   }
 })
 
+// PATCH /api/line/accounts/:accountId — แก้ไข LINE OA (channelAccessToken, channelSecret, webhookPath)
+// body: { channelAccessToken?, channelSecret?, webhookPath? }
+app.patch('/api/line/accounts/:accountId', (req, res) => {
+  try {
+    const { accountId } = req.params
+    const { channelAccessToken, channelSecret, webhookPath } = req.body
+    if (!channelAccessToken && !channelSecret && webhookPath === undefined) {
+      return res.status(400).json({ error: 'ต้องระบุอย่างน้อยหนึ่งฟิลด์: channelAccessToken, channelSecret, webhookPath' })
+    }
+    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
+    const line = config.channels?.line
+    if (!line) return res.status(404).json({ error: 'LINE not configured' })
+
+    if (accountId === 'default') {
+      if (!line.channelAccessToken) return res.status(404).json({ error: 'Default LINE OA not found' })
+      if (channelAccessToken) line.channelAccessToken = channelAccessToken
+      if (channelSecret) line.channelSecret = channelSecret
+      if (webhookPath !== undefined) line.webhookPath = webhookPath || undefined
+    } else {
+      if (!line.accounts?.[accountId]) return res.status(404).json({ error: `Account "${accountId}" not found` })
+      if (channelAccessToken) line.accounts[accountId].channelAccessToken = channelAccessToken
+      if (channelSecret) line.accounts[accountId].channelSecret = channelSecret
+      if (webhookPath !== undefined) {
+        if (webhookPath) line.accounts[accountId].webhookPath = webhookPath
+        else delete line.accounts[accountId].webhookPath
+      }
+    }
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2))
+    res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ error: e.message })
+  }
+})
+
 // GET /api/line/bindings — route bindings ทุก account [{ accountId, agentId }]
 app.get('/api/line/bindings', (req, res) => {
   try {

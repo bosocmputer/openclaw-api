@@ -90,7 +90,7 @@ node index.js
 
 ```bash
 cd ~/openclaw-api
-git pull
+git pull origin main 
 npm install
 pm2 restart openclaw-api
 ```

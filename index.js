@@ -36,9 +36,9 @@ function generateSoulTemplate(_workspace, accessMode = 'general', mcpUrl = null)
 
   const roleTools = {
     admin: `## Tools ที่ใช้ได้
-- search_customer                 — ค้นหาลูกค้า
-- search_product                  — ค้นหาสินค้า
-- search_supplier                 — ค้นหาผู้จำหน่าย
+- search_customer                 — ค้นหาลูกค้า (args: keyword, limit=5 max 20)
+- search_product                  — ค้นหาสินค้า (args: keyword, limit=5 max 20)
+- search_supplier                 — ค้นหาผู้จำหน่าย (args: keyword, limit=5 max 20)
 - get_stock_balance               — ยอดคงเหลือสินค้า
 - get_product_price               — ราคาสินค้า
 - get_account_incoming            — สินค้าค้างรับ
@@ -69,8 +69,8 @@ function generateSoulTemplate(_workspace, accessMode = 'general', mcpUrl = null)
 - fallback_response               — แจ้งเมื่อไม่มี tool รองรับ`,
 
     sales: `## Tools ที่ใช้ได้
-- search_customer         — ค้นหาลูกค้า
-- search_product          — ค้นหาสินค้า
+- search_customer         — ค้นหาลูกค้า (args: keyword, limit=5 max 20)
+- search_product          — ค้นหาสินค้า (args: keyword, limit=5 max 20)
 - get_stock_balance       — ยอดคงเหลือสินค้า
 - get_product_price       — ราคาสินค้า
 - get_account_outstanding — สินค้าค้างส่ง
@@ -78,14 +78,14 @@ function generateSoulTemplate(_workspace, accessMode = 'general', mcpUrl = null)
 - fallback_response       — แจ้งเมื่อไม่มี tool รองรับ`,
 
     purchase: `## Tools ที่ใช้ได้
-- search_product          — ค้นหาสินค้า
-- search_supplier         — ค้นหาผู้จำหน่าย
+- search_product          — ค้นหาสินค้า (args: keyword, limit=5 max 20)
+- search_supplier         — ค้นหาผู้จำหน่าย (args: keyword, limit=5 max 20)
 - get_stock_balance       — ยอดคงเหลือสินค้า
 - get_account_incoming    — สินค้าค้างรับ
 - fallback_response       — แจ้งเมื่อไม่มี tool รองรับ`,
 
     stock: `## Tools ที่ใช้ได้
-- search_product          — ค้นหาสินค้า
+- search_product          — ค้นหาสินค้า (args: keyword, limit=5 max 20)
 - get_stock_balance       — ยอดคงเหลือสินค้า
 - get_account_incoming    — สินค้าค้างรับ
 - get_account_outstanding — สินค้าค้างส่ง
@@ -93,7 +93,7 @@ function generateSoulTemplate(_workspace, accessMode = 'general', mcpUrl = null)
 - fallback_response       — แจ้งเมื่อไม่มี tool รองรับ`,
 
     general: `## Tools ที่ใช้ได้
-- search_product    — ค้นหาสินค้า
+- search_product    — ค้นหาสินค้า (args: keyword, limit=5 max 20)
 - get_stock_balance — ยอดคงเหลือสินค้า
 - get_product_price — ราคาสินค้า
 - fallback_response — แจ้งเมื่อไม่มี tool รองรับ`,
@@ -124,7 +124,7 @@ function generateSoulTemplate(_workspace, accessMode = 'general', mcpUrl = null)
 ## เทคนิคการค้นหาสินค้า
 - รักษา context การสนทนาไว้เสมอ: ถ้า user ถามถึง brand/ยี่ห้อขณะที่กำลังคุยเรื่องประเภทสินค้าอยู่ ให้ค้นด้วยทั้ง brand และประเภทสินค้าที่คุยกันอยู่พร้อมกัน (ค้น brand ก่อน แล้วกรองเฉพาะที่ตรงประเภทสินค้า)
 - ถ้าค้นด้วย keyword รวมแล้วไม่พบ ให้ลองค้นแยก keyword ทีละคำ แล้วกรองผลเอง
-- ถ้าผลลัพธ์มากกว่า 5 รายการ ให้แสดง 5 รายการแรก และบอก user ว่ายังมีอีก พร้อมถามว่าต้องการค้นหาเพิ่มเติมไหม`,
+- ถ้า user ขอให้แสดงมากขึ้น ให้เรียก tool เดิมใหม่พร้อม limit ตามที่ขอ`,
     general: '',
   }
 
@@ -143,7 +143,9 @@ function generateSoulTemplate(_workspace, accessMode = 'general', mcpUrl = null)
 - เมื่อรับคำทักทาย ให้ตอบทักทายสั้น ๆ แล้วรอรับคำถาม — ห้ามแสดงรายการสิ่งที่ทำได้
 - ถ้าคำถามไม่ระบุ keyword / รหัสสินค้า / ลูกค้า / ช่วงเวลา ให้ถามกลับก่อน อย่าเรียก tool โดยไม่มีข้อมูลเพียงพอ
 - ถ้าไม่มี tool รองรับในกรณีอื่น ๆ ให้ตอบตรง ๆ ว่าทำไม่ได้ ห้ามตอบว่า NO_REPLY หรือแสดง error ให้ผู้ใช้เห็น
-- ผลลัพธ์จาก curl จะอยู่ใน \`content[0].text\` — ต้อง parse JSON เพื่อดึงข้อมูล${extra}
+- ผลลัพธ์จาก curl จะอยู่ใน \`content[0].text\` — ต้อง parse JSON เพื่อดึงข้อมูล
+- tools ที่รับ keyword จะคืนค่า \`total_found\` (จำนวนที่พบทั้งหมด) และ \`returned\` (จำนวนที่แสดง) — ถ้า total_found > returned ให้แจ้ง user ว่า "พบ X รายการ แสดง Y รายการแรก" และถามว่าต้องการดูเพิ่มไหม
+- tools ที่รับ keyword รองรับ parameter \`limit\` (ค่าเริ่มต้น 5, สูงสุด 20) — ถ้า user ขอดูมากขึ้น ให้ส่ง limit ตามที่ขอ${extra}
 
 ## วิธีเรียก tool
 \`\`\`bash
@@ -155,11 +157,11 @@ curl -s -X POST ${callUrl} \\
 
 ## ตัวอย่าง
 \`\`\`bash
-# ค้นหาสินค้า
+# ค้นหา (limit เริ่มต้น 5, เพิ่มได้สูงสุด 20)
 curl -s -X POST ${callUrl} \\
   -H "Content-Type: application/json" \\
   -H "mcp-access-mode: ${accessMode}" \\
-  -d '{"name": "search_product", "arguments": {"keyword": "กาแฟ"}}'
+  -d '{"name": "<search_tool>", "arguments": {"keyword": "<คำค้นหา>", "limit": 5}}'
 
 # ยอดคงเหลือสินค้า
 curl -s -X POST ${callUrl} \\

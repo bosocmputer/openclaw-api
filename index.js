@@ -852,6 +852,7 @@ app.patch('/api/line/accounts/:accountId', (req, res) => {
     if (accountId === 'default') {
       if (line.accounts?.default) {
         // stored as named account 'default' under accounts
+        line.accounts.default.enabled = true
         if (channelAccessToken) line.accounts.default.channelAccessToken = channelAccessToken
         if (channelSecret) line.accounts.default.channelSecret = channelSecret
         if (webhookPath !== undefined) {

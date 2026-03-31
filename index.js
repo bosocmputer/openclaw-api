@@ -850,10 +850,22 @@ app.patch('/api/line/accounts/:accountId', (req, res) => {
     if (!line) return res.status(404).json({ error: 'LINE not configured' })
 
     if (accountId === 'default') {
-      if (!line.channelAccessToken) return res.status(404).json({ error: 'Default LINE OA not found' })
-      if (channelAccessToken) line.channelAccessToken = channelAccessToken
-      if (channelSecret) line.channelSecret = channelSecret
-      if (webhookPath !== undefined) line.webhookPath = webhookPath || undefined
+      if (line.accounts?.default) {
+        // stored as named account 'default' under accounts
+        if (channelAccessToken) line.accounts.default.channelAccessToken = channelAccessToken
+        if (channelSecret) line.accounts.default.channelSecret = channelSecret
+        if (webhookPath !== undefined) {
+          if (webhookPath) line.accounts.default.webhookPath = webhookPath
+          else delete line.accounts.default.webhookPath
+        }
+      } else if (line.channelAccessToken) {
+        // stored top-level
+        if (channelAccessToken) line.channelAccessToken = channelAccessToken
+        if (channelSecret) line.channelSecret = channelSecret
+        if (webhookPath !== undefined) line.webhookPath = webhookPath || undefined
+      } else {
+        return res.status(404).json({ error: 'Default LINE OA not found' })
+      }
     } else {
       if (!line.accounts?.[accountId]) return res.status(404).json({ error: `Account "${accountId}" not found` })
       if (channelAccessToken) line.accounts[accountId].channelAccessToken = channelAccessToken

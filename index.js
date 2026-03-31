@@ -99,6 +99,14 @@ function generateSoulTemplate(_workspace, accessMode = 'general', mcpUrl = null)
 - fallback_response — แจ้งเมื่อไม่มี tool รองรับ`,
   }
 
+  const searchTips = `
+## เทคนิคการค้นหา
+- ถ้า user ระบุทั้ง brand และประเภทในคำถามเดียว ให้รวมเป็น keyword เดียวเสมอ เช่น "หลอดไฟ kotto" — ห้ามค้นแค่ brand อย่างเดียว
+- ถ้าค้นด้วย brand อย่างเดียวแล้วได้ผลเยอะแต่ไม่ตรงประเภทที่ user ต้องการ ให้ค้นใหม่ทันทีด้วย "[ประเภท] [brand]" โดยไม่ต้องถาม user ก่อน
+- รักษา context การสนทนา: ถ้า user ถามถึง brand ขณะที่กำลังคุยเรื่องประเภทอยู่ ให้รวม keyword ทั้งสองเสมอ
+- ถ้าค้นด้วย keyword รวมแล้วไม่พบ ให้ลองค้นแยก keyword ทีละคำ แล้วกรองผลเอง
+- ถ้า user ขอให้แสดงมากขึ้น ให้เรียก tool เดิมใหม่พร้อม limit ตามที่ขอ`
+
   const roleExtra = {
     sales: `
 
@@ -119,15 +127,11 @@ function generateSoulTemplate(_workspace, accessMode = 'general', mcpUrl = null)
 
 5. แจ้ง user ว่ารับรายการแล้ว กรุณายืนยันกับเจ้าหน้าที่ฝ่ายขายเพื่อดำเนินการออเดอร์ต่อไป
 
-ระบบรองรับการรับรายการสินค้าและตรวจสอบข้อมูล แต่การออเดอร์จริงจะดำเนินการโดยเจ้าหน้าที่
-
-## เทคนิคการค้นหา
-- ถ้า user ระบุทั้ง brand และประเภทสินค้าในคำถามเดียว ให้รวมเป็น keyword เดียวเสมอ เช่น "หลอดไฟ kotto" — ห้ามค้นแค่ brand อย่างเดียว
-- ถ้าค้นด้วย brand อย่างเดียวแล้วได้ผลเยอะแต่ไม่ตรงประเภทที่ user ต้องการ ให้ค้นใหม่ทันทีด้วย "[ประเภท] [brand]" โดยไม่ต้องถาม user ก่อน
-- รักษา context การสนทนา: ถ้า user ถามถึง brand ขณะที่กำลังคุยเรื่องประเภทสินค้าอยู่ ให้รวม keyword ทั้งสองเสมอ
-- ถ้าค้นด้วย keyword รวมแล้วไม่พบ ให้ลองค้นแยก keyword ทีละคำ แล้วกรองผลเอง
-- ถ้า user ขอให้แสดงมากขึ้น ให้เรียก tool เดิมใหม่พร้อม limit ตามที่ขอ`,
-    general: '',
+ระบบรองรับการรับรายการสินค้าและตรวจสอบข้อมูล แต่การออเดอร์จริงจะดำเนินการโดยเจ้าหน้าที่${searchTips}`,
+    purchase: `${searchTips}`,
+    stock: `${searchTips}`,
+    admin: `${searchTips}`,
+    general: `${searchTips}`,
   }
 
   const desc = roleDescriptions[accessMode] || roleDescriptions.general

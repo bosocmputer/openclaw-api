@@ -1390,7 +1390,7 @@ app.post('/api/webchat/send', requirePg, async (req, res) => {
     try { config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) } catch {}
     const hooksPort = config?.gateway?.hooksPort || 18789
     const hooksToken = process.env.HOOKS_TOKEN || config?.hooks?.token || ''
-    const sessionKey = `hook:webchat:${username}`
+    const sessionKey = `hook:webchat:uid:${username}`
 
     // บันทึก user message ก่อน
     await pgPool.query(

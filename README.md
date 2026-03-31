@@ -147,8 +147,8 @@ pm2 restart openclaw-api
 | PUT | `/api/line/bindings` | set route binding |
 | POST | `/api/line/accounts` | เพิ่ม LINE OA (accountId, channelAccessToken, channelSecret, webhookPath) |
 | DELETE | `/api/line/accounts/:id` | ลบ LINE OA |
-| GET | `/api/line/pending` | รายการรอ pairing |
-| POST | `/api/line/approve` | approve pairing code |
+| GET | `/api/line/pending` | รายการรอ pairing (legacy — ไม่ใช้ใน UI แล้ว) |
+| POST | `/api/line/approve` | approve pairing code (legacy — dmPolicy="open" ตลอด ไม่ต้อง pairing) |
 | GET | `/api/monitor/events` | real-time session state ทุก agent/channel (telegram/line/webchat) |
 
 ## Authentication
@@ -178,4 +178,6 @@ Authorization: Bearer <API_TOKEN>
 - **LINE webhookPath ต้องไม่ซ้ำกัน** — `registerPluginHttpRoute` ใช้ `replaceExisting:true` → ถ้า 2 OA ใช้ path เดียวกัน OA แรกได้ 401
 - **LINE session key**: `agent:<agentId>:line:direct:<lineUserId>` เช่น `agent:sale:line:direct:u6490df71c89c6db1b51c7084b46055ef`
 - **LINE channel** parse จาก session key: contains `':line:'` → channel='line'
+- **LINE dmPolicy** — ใช้ `"open"` เสมอทั้งสร้างใหม่และอยู่ใน config — pairing ถูกลบออกแล้ว ไม่ต้อง approve
 - **cloudflared**: LINE webhook ต้องการ HTTPS — expose port 18789 ด้วย `cloudflared tunnel --url http://localhost:18789`
+- **proxy.ts CHAT_ALLOWED** — role=chat ต้องมี `/api` ใน allowed list มิฉะนั้น browser API calls จาก webchat จะถูก redirect เป็น HTML และ axios crash

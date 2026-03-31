@@ -25,6 +25,7 @@ function generateSoulTemplate(_workspace, accessMode = 'general', mcpUrl = null)
   const callUrl = mcpUrl
     ? mcpUrl.replace('/sse', '/call').replace(/\/call\/.*/, '/call')
     : 'http://<mcp-server>:3002/call'
+  const saleReserveUrl = callUrl.replace('/call', '/api/sale_reserve')
 
   const roleDescriptions = {
     admin:    'ผู้ช่วย AI สำหรับผู้บริหาร — เข้าถึงข้อมูลได้ทุกส่วน รวมถึงรายงานและการวิเคราะห์',
@@ -66,15 +67,17 @@ function generateSoulTemplate(_workspace, accessMode = 'general', mcpUrl = null)
 - get_customer_profitability      — กำไรต่อลูกค้า
 - get_customer_segment_summary    — Dashboard CRM ภาพรวมสำหรับผู้บริหาร
 - get_salesman_crm_kpi            — KPI พนักงานขายเชิง CRM
+- create_sale_reserve             — บันทึกใบสั่งจอง (ใช้ endpoint พิเศษ ดูด้านล่าง)
 - fallback_response               — แจ้งเมื่อไม่มี tool รองรับ`,
 
     sales: `## Tools ที่ใช้ได้
 - search_customer         — ค้นหาลูกค้า (args: keyword, limit=5 max 20)
 - search_product          — ค้นหาสินค้า (args: keyword, limit=5 max 20)
 - get_stock_balance       — ยอดคงเหลือสินค้า
-- get_product_price       — ราคาสินค้า
+- get_product_price       — ราคาสินค้า (คืน unit_code ด้วย)
 - get_account_outstanding — สินค้าค้างส่ง
 - get_bookout_balance     — สินค้าค้างจอง
+- create_sale_reserve     — บันทึกใบสั่งจอง (ใช้ endpoint พิเศษ ดูด้านล่าง)
 - fallback_response       — แจ้งเมื่อไม่มี tool รองรับ`,
 
     purchase: `## Tools ที่ใช้ได้
@@ -107,30 +110,44 @@ function generateSoulTemplate(_workspace, accessMode = 'general', mcpUrl = null)
 - ถ้าค้นด้วย keyword รวมแล้วไม่พบ ให้ลองค้นแยก keyword ทีละคำ แล้วกรองผลเอง
 - ถ้า user ขอให้แสดงมากขึ้น ให้เรียก tool เดิมใหม่พร้อม limit ตามที่ขอ`
 
-  const roleExtra = {
-    sales: `
+  const saleReserveExtra = `
 
-## การรับคำสั่งซื้อ (ตะกร้าสินค้า)
-เมื่อ user แจ้งว่าต้องการซื้อสินค้า ห้ามปฏิเสธว่าทำไม่ได้ ให้ทำตามขั้นตอนนี้ทันที:
-1. รัน search_product เพื่อค้นหาสินค้าตามที่ user ระบุ
-2. รัน get_stock_balance เพื่อตรวจสต็อกว่ามีเพียงพอในจำนวนที่ขอ
-3. รัน get_product_price เพื่อดึงราคาต่อหน่วย
-4. สรุปรายการเป็น text ดังนี้:
+## การบันทึกใบสั่งจอง (Sale Reservation)
+เมื่อ user ต้องการสั่งซื้อหรือจองสินค้า ให้ทำตามขั้นตอนนี้ทันที ห้ามปฏิเสธ:
 
-สรุปรายการสั่งซื้อ
+1. รัน search_product เพื่อหา item_code จากชื่อสินค้า
+2. รัน get_stock_balance เพื่อตรวจสต็อก
+3. รัน get_product_price เพื่อดึงราคาและ unit_code
+4. ถ้ายังไม่มีชื่อและเบอร์โทรลูกค้า ให้ถามก่อน
+5. สรุปรายการให้ user ยืนยัน:
+
+สรุปใบสั่งจอง
 -------------------
-สินค้า: [ชื่อสินค้า] ([รหัส])
-จำนวน: [X] [หน่วย]
+ลูกค้า: [ชื่อ] ([เบอร์])
+สินค้า: [ชื่อ] ([item_code])
+จำนวน: [X] [unit_code]
 ราคาต่อหน่วย: [X] บาท
 รวม: [X] บาท
 สต็อกคงเหลือ: [X] [หน่วย]
 
-5. แจ้ง user ว่ารับรายการแล้ว กรุณายืนยันกับเจ้าหน้าที่ฝ่ายขายเพื่อดำเนินการออเดอร์ต่อไป
+6. เมื่อ user ยืนยัน ให้รัน create_sale_reserve ผ่าน endpoint พิเศษ:
 
-ระบบรองรับการรับรายการสินค้าและตรวจสอบข้อมูล แต่การออเดอร์จริงจะดำเนินการโดยเจ้าหน้าที่${searchTips}`,
+\`\`\`bash
+curl -s -X POST ${saleReserveUrl} \\
+  -H "Content-Type: application/json" \\
+  -H "mcp-access-mode: ${accessMode}" \\
+  -d '{"name": "create_sale_reserve", "arguments": {"contact_name": "<ชื่อลูกค้า>", "contact_phone": "<เบอร์>", "items": [{"item_code": "<รหัส>", "qty": <จำนวน>, "unit_code": "<หน่วย>", "price": <ราคา>}]}}'
+\`\`\`
+
+7. แจ้งผลลัพธ์: ถ้าสำเร็จจะได้ doc_no กลับมา เช่น "บันทึกใบสั่งจองเลขที่ SR-2026-0001 เรียบร้อยแล้ว"
+
+> create_sale_reserve ใช้ endpoint \`/api/sale_reserve\` ไม่ใช่ \`/call\` — ห้ามสลับกัน${searchTips}`
+
+  const roleExtra = {
+    sales: saleReserveExtra,
     purchase: `${searchTips}`,
     stock: `${searchTips}`,
-    admin: `${searchTips}`,
+    admin: saleReserveExtra,
     general: `${searchTips}`,
   }
 

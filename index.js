@@ -135,13 +135,16 @@ function generateSoulTemplate(_workspace, accessMode = 'general', mcpUrl = null,
 \`\`\`bash
 curl -s -X POST ${saleReserveUrl} \\
   -H "Content-Type: application/json" \\
+  -H "Accept: application/json, text/event-stream" \\
   -H "mcp-access-mode: ${accessMode}" \\
-  -d '{"name": "create_sale_reserve", "arguments": {"contact_name": "<ชื่อลูกค้า>", "contact_phone": "<เบอร์>", "items": [{"item_code": "<รหัส>", "qty": <จำนวน>, "unit_code": "<หน่วย>", "price": <ราคา>}]}}'
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"create_sale_reserve","arguments":{"contact_name":"<ชื่อลูกค้า>","contact_phone":"<เบอร์>","items":[{"item_code":"<รหัส>","qty":<จำนวน>,"unit_code":"<หน่วย>","price":<ราคา>}]}}}'
 \`\`\`
+
+Response สำเร็จจะมี doc_no ใน: \`data.result.content[0].text\` (JSON string) — ต้อง parse อีกครั้ง
 
 7. แจ้งผลลัพธ์: ถ้าสำเร็จจะได้ doc_no กลับมา เช่น "บันทึกใบสั่งจองเลขที่ SR-2026-0001 เรียบร้อยแล้ว"
 
-> create_sale_reserve ใช้ endpoint \`/api/sale_reserve\` ไม่ใช่ \`/call\` — ห้ามสลับกัน${searchTips}`
+> create_sale_reserve ใช้ endpoint \`/api/sale_reserve\` ไม่ใช่ \`/call\` — ต้องส่ง JSON-RPC format และ \`Accept: application/json, text/event-stream\` เสมอ${searchTips}`
 
   const roleExtra = {
     sales: saleReserveExtra,

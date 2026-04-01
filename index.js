@@ -998,8 +998,34 @@ app.put('/api/model', (req, res) => {
   }
 })
 
+// cleanStaleSessions — ลบ sessions ที่ทำให้ webchat ตอบผ่าน LINE ผิดช่อง
+// 1. key=*:main ที่มี lastChannel=line (gateway fallback session)
+// 2. key=*:hook:webchat:* ที่ไม่มี uid: prefix (เวอร์ชันเก่าก่อน uid: fix)
+function cleanStaleSessions() {
+  try {
+    const agentsBase = path.join(HOME, '.openclaw/agents')
+    if (!fs.existsSync(agentsBase)) return
+    for (const agentId of fs.readdirSync(agentsBase)) {
+      const sessFile = path.join(agentsBase, agentId, 'sessions/sessions.json')
+      if (!fs.existsSync(sessFile)) continue
+      const data = JSON.parse(fs.readFileSync(sessFile, 'utf8'))
+      const toDelete = Object.keys(data).filter(key =>
+        (key.endsWith(':main') && data[key]?.lastChannel === 'line') ||
+        (key.includes(':hook:webchat:') && !key.includes(':hook:webchat:uid:'))
+      )
+      if (toDelete.length === 0) continue
+      for (const k of toDelete) delete data[k]
+      fs.writeFileSync(sessFile, JSON.stringify(data, null, 2))
+      console.log(`[cleanStaleSessions] ${agentId}: removed ${toDelete.length} stale session(s): ${toDelete.join(', ')}`)
+    }
+  } catch (e) {
+    console.error('[cleanStaleSessions] error:', e.message)
+  }
+}
+
 // POST /api/gateway/restart — restart gateway
 app.post('/api/gateway/restart', (req, res) => {
+  cleanStaleSessions()
   exec(
     'openclaw gateway restart',
     execOpts,

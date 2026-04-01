@@ -21,7 +21,7 @@ const OPENCLAW_PKG = process.env.OPENCLAW_PKG || ''
 const execOpts = OPENCLAW_PKG ? { cwd: OPENCLAW_PKG } : {}
 
 // SOUL template generator — ใช้ HTTP POST /call แทน mcporter exec
-function generateSoulTemplate(_workspace, accessMode = 'general', mcpUrl = null) {
+function generateSoulTemplate(_workspace, accessMode = 'general', mcpUrl = null, persona = 'professional') {
   const callUrl = mcpUrl
     ? mcpUrl.replace('/sse', '/call').replace(/\/call\/.*/, '/call')
     : 'http://<mcp-server>:3002/call'
@@ -151,11 +151,32 @@ curl -s -X POST ${saleReserveUrl} \\
     general: `${searchTips}`,
   }
 
+  const personaBlocks = {
+    professional: `## บุคลิก
+- ตอบสุภาพ ทางการ กระชับ ตรงประเด็น
+- ไม่ใช้อีโมจิ ไม่คุยเรื่องนอกเหนือขอบเขตงาน`,
+    friendly: `## บุคลิก
+- ตอบเป็นกันเอง ใช้ภาษาพูดทั่วไป
+- ใช้อีโมจิได้เล็กน้อยเพื่อให้ดูอบอุ่น เช่น 😊 👍
+- ยังคงตอบตรงประเด็น แต่รู้สึกเหมือนคุยกับเพื่อนร่วมงาน`,
+    cheerful: `## บุคลิก
+- ตอบสดใส กระตือรือร้น ให้กำลังใจ
+- ใช้อีโมจิได้มากขึ้น เช่น 🎉 ✅ 🔍
+- ขึ้นต้นด้วยคำทักทายสั้น ๆ ก่อนตอบ เช่น "ได้เลย!" "มาดูกัน!"`,
+    strict: `## บุคลิก
+- ตอบข้อมูลล้วน ไม่มีคำพูดเสริม ไม่มีอีโมจิ
+- ถ้าคำถามนอกขอบเขต ตอบสั้น ๆ ว่า "ไม่อยู่ในขอบเขตที่ดูแลได้"
+- ไม่ทักทาย ไม่คุยเรื่องทั่วไป`,
+  }
+
   const desc = roleDescriptions[accessMode] || roleDescriptions.general
   const tools = roleTools[accessMode] || roleTools.general
   const extra = roleExtra[accessMode] ?? ''
+  const personaBlock = personaBlocks[persona] ?? personaBlocks.professional
 
   return `คุณคือ${desc}
+
+${personaBlock}
 
 ## กฎพื้นฐาน
 - ดึงข้อมูลจากระบบจริงทุกครั้ง ห้ามตอบจากความจำ
@@ -326,8 +347,9 @@ app.get('/api/agents/:id/soul/template', (req, res) => {
     const workspaceTilde = agent.workspace.startsWith(HOME)
       ? agent.workspace.replace(HOME, '~')
       : agent.workspace
-    const soul = generateSoulTemplate(workspaceTilde, accessMode, mcpUrl)
-    res.json({ soul, accessMode })
+    const persona = req.query.persona || 'professional'
+    const soul = generateSoulTemplate(workspaceTilde, accessMode, mcpUrl, persona)
+    res.json({ soul, accessMode, persona })
   } catch (e) {
     res.status(500).json({ error: e.message })
   }

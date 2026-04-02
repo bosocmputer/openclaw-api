@@ -1,5 +1,6 @@
 const express = require('express')
 const cors = require('cors')
+const helmet = require('helmet')
 const fs = require('fs')
 const path = require('path')
 const { execSync, exec } = require('child_process')
@@ -237,8 +238,10 @@ function writeUserNames(names) {
   fs.writeFileSync(USERNAMES_PATH, JSON.stringify(names, null, 2))
 }
 
-app.use(cors())
-app.use(express.json())
+const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || null
+app.use(helmet())
+app.use(cors(ALLOWED_ORIGIN ? { origin: ALLOWED_ORIGIN } : {}))
+app.use(express.json({ limit: '1mb' }))
 
 // Auth middleware
 app.use((req, res, next) => {
@@ -263,17 +266,28 @@ app.get('/api/config', (req, res) => {
     const raw = fs.readFileSync(CONFIG_PATH, 'utf8')
     res.json(JSON.parse(raw))
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
 // PUT /api/config — เขียน openclaw.json (gateway hot-reload อัตโนมัติ)
 app.put('/api/config', (req, res) => {
   try {
-    fs.writeFileSync(CONFIG_PATH, JSON.stringify(req.body, null, 2))
+    if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body))
+      return res.status(400).json({ error: 'Invalid config: must be a JSON object' })
+    // ต้องมี gateway key เป็น object
+    if (req.body.gateway !== undefined && (typeof req.body.gateway !== 'object' || Array.isArray(req.body.gateway)))
+      return res.status(400).json({ error: 'Invalid config: gateway must be an object' })
+    const serialized = JSON.stringify(req.body, null, 2)
+    // เขียน temp file ก่อน แล้ว rename เพื่อป้องกัน partial write
+    const tmpPath = CONFIG_PATH + '.tmp'
+    fs.writeFileSync(tmpPath, serialized)
+    fs.renameSync(tmpPath, CONFIG_PATH)
     res.json({ ok: true })
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -298,7 +312,8 @@ app.get('/api/agents', (req, res) => {
     })
     res.json(agents)
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -331,7 +346,8 @@ app.post('/api/agents', (req, res) => {
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2))
     res.json({ ok: true })
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -354,7 +370,8 @@ app.get('/api/agents/:id/soul/template', (req, res) => {
     const soul = generateSoulTemplate(workspaceTilde, accessMode, mcpUrl, persona)
     res.json({ soul, accessMode, persona })
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -370,7 +387,8 @@ app.delete('/api/agents/:id', (req, res) => {
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2))
     res.json({ ok: true })
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -383,13 +401,16 @@ app.get('/api/agents/:id/soul', (req, res) => {
     const soulPath = path.join(agent.workspace.replace('~', HOME), 'SOUL.md')
     res.json({ soul: fs.existsSync(soulPath) ? fs.readFileSync(soulPath, 'utf8') : '' })
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
 // PUT /api/agents/:id/soul — เขียน SOUL.md
 app.put('/api/agents/:id/soul', (req, res) => {
   try {
+    if (typeof req.body.soul !== 'string')
+      return res.status(400).json({ error: 'soul must be a string' })
     const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
     const agent = config.agents?.list?.find(a => a.id === req.params.id)
     if (!agent) return res.status(404).json({ error: 'Agent not found' })
@@ -397,7 +418,8 @@ app.put('/api/agents/:id/soul', (req, res) => {
     fs.writeFileSync(soulPath, req.body.soul)
     res.json({ ok: true })
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -410,7 +432,8 @@ app.get('/api/agents/:id/mcp', (req, res) => {
     const mcpPath = path.join(agent.workspace.replace('~', HOME), 'config/mcporter.json')
     res.json(fs.existsSync(mcpPath) ? JSON.parse(fs.readFileSync(mcpPath, 'utf8')) : {})
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -425,7 +448,8 @@ app.put('/api/agents/:id/mcp', (req, res) => {
     fs.writeFileSync(path.join(mcpDir, 'mcporter.json'), JSON.stringify(req.body, null, 2))
     res.json({ ok: true })
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -440,7 +464,8 @@ app.get('/api/agents/:id/users', (req, res) => {
       .filter(Boolean)
     res.json(users)
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -485,7 +510,8 @@ app.post('/api/agents/:id/users', (req, res) => {
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2))
     res.json({ ok: true })
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -515,7 +541,8 @@ app.delete('/api/agents/:id/users/:userId', (req, res) => {
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2))
     res.json({ ok: true })
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -525,7 +552,8 @@ app.get('/api/telegram', (req, res) => {
     const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
     res.json(config.channels?.telegram || {})
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -538,7 +566,8 @@ app.put('/api/telegram', (req, res) => {
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2))
     res.json({ ok: true })
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -575,7 +604,8 @@ app.get('/api/telegram/botinfo', async (req, res) => {
     }
     res.json(results)
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -602,7 +632,8 @@ app.post('/api/telegram/accounts', (req, res) => {
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2))
     res.json({ ok: true })
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -648,7 +679,8 @@ app.post('/api/telegram/set-default', (req, res) => {
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2))
     res.json({ ok: true })
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -672,7 +704,8 @@ app.delete('/api/telegram/accounts/:accountId', (req, res) => {
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2))
     res.json({ ok: true })
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -698,7 +731,8 @@ app.get('/api/telegram/bindings', (req, res) => {
       .map(b => ({ agentId: b.agentId, accountId: b.match.accountId }))
     res.json(routes)
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -720,7 +754,8 @@ app.put('/api/telegram/bindings', (req, res) => {
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2))
     res.json({ ok: true })
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -751,7 +786,8 @@ app.get('/api/line', (req, res) => {
     const line = config.channels?.line || null
     res.json({ line })
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -773,7 +809,8 @@ app.get('/api/line/botinfo', async (req, res) => {
     }
     res.json(results)
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -819,7 +856,8 @@ app.post('/api/line/accounts', (req, res) => {
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2))
     res.json({ ok: true })
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -857,7 +895,8 @@ app.delete('/api/line/accounts/:accountId', (req, res) => {
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2))
     res.json({ ok: true })
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -904,7 +943,8 @@ app.patch('/api/line/accounts/:accountId', (req, res) => {
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2))
     res.json({ ok: true })
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -917,7 +957,8 @@ app.get('/api/line/bindings', (req, res) => {
       .map(b => ({ accountId: b.match.accountId, agentId: b.agentId }))
     res.json(routes)
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -938,7 +979,8 @@ app.put('/api/line/bindings', (req, res) => {
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2))
     res.json({ ok: true })
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -954,7 +996,8 @@ app.get('/api/line/pending', (req, res) => {
       .map(([code, v]) => ({ code, senderId: v.id, createdAt: v.createdAt, expiresAt: v.expiresAt }))
     res.json(pending)
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -980,7 +1023,8 @@ app.get('/api/model', (req, res) => {
     const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
     res.json({ model: config.agents?.defaults?.model?.primary || '' })
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -997,7 +1041,8 @@ app.put('/api/model', (req, res) => {
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2))
     res.json({ ok: true })
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -1022,6 +1067,7 @@ function cleanStaleSessions() {
       console.log(`[cleanStaleSessions] ${agentId}: removed ${toDelete.length} stale session(s): ${toDelete.join(', ')}`)
     }
   } catch (e) {
+    console.error('[openclaw-api]', req.method, req.path, e.message)
     console.error('[cleanStaleSessions] error:', e.message)
   }
 }
@@ -1080,7 +1126,8 @@ app.get('/api/gateway/logs', (req, res) => {
     }
     res.json(entries)
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -1142,7 +1189,8 @@ app.post('/api/agents/:id/mcp/test', (req, res) => {
       })
       .catch(err => res.status(500).json({ error: err.message }))
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -1228,7 +1276,8 @@ app.get('/api/models', async (req, res) => {
 
     res.status(400).json({ error: `Unknown provider: ${provider}` })
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -1265,7 +1314,9 @@ app.post('/api/models/test', async (req, res) => {
     const response = await fetch(url, { headers, signal: AbortSignal.timeout(8000) })
     res.json({ ok: response.ok, status: response.status })
   } catch (e) {
-    res.json({ ok: false, error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    const msg = e.name === 'TimeoutError' ? 'Request timed out' : 'Connection failed'
+    res.json({ ok: false, error: msg })
   }
 })
 
@@ -1279,7 +1330,7 @@ try {
     console.log('PostgreSQL connected')
   }
 } catch (e) {
-  console.warn('pg module not found — members API disabled')
+  console.warn('pg module not found — members API disabled', e.message)
 }
 
 function requirePg(req, res, next) {
@@ -1295,7 +1346,8 @@ app.get('/api/members', requirePg, async (req, res) => {
     )
     res.json(rows)
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -1313,8 +1365,9 @@ app.post('/api/members', requirePg, async (req, res) => {
     )
     res.json(rows[0])
   } catch (e) {
+    console.error('[openclaw-api]', req.method, req.path, e.message)
     if (e.code === '23505') return res.status(400).json({ error: 'ชื่อผู้ใช้นี้มีอยู่แล้ว' })
-    res.status(500).json({ error: e.message })
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -1343,7 +1396,8 @@ app.patch('/api/members/:id', requirePg, async (req, res) => {
     }
     res.json({ ok: true })
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -1362,7 +1416,8 @@ app.delete('/api/members/:id', requirePg, async (req, res) => {
     await pgPool.query('DELETE FROM admin_users WHERE id = $1', [id])
     res.json({ ok: true })
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -1388,7 +1443,8 @@ app.get('/api/webchat/rooms', requirePg, async (req, res) => {
     }
     res.json(rows)
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -1405,8 +1461,9 @@ app.post('/api/webchat/rooms', requirePg, async (req, res) => {
     )
     res.json({ ...rows[0], allowed_users: [] })
   } catch (e) {
+    console.error('[openclaw-api]', req.method, req.path, e.message)
     if (e.code === '23505') return res.status(400).json({ error: 'agent_id นี้มีห้องอยู่แล้ว' })
-    res.status(500).json({ error: e.message })
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -1424,7 +1481,8 @@ app.put('/api/webchat/rooms/:id', requirePg, async (req, res) => {
     }
     res.json({ ok: true })
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -1434,7 +1492,8 @@ app.delete('/api/webchat/rooms/:id', requirePg, async (req, res) => {
     await pgPool.query('DELETE FROM webchat_rooms WHERE id = $1', [req.params.id])
     res.json({ ok: true })
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -1450,7 +1509,8 @@ app.post('/api/webchat/rooms/:id/users', requirePg, async (req, res) => {
     )
     res.json({ ok: true })
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -1463,7 +1523,8 @@ app.delete('/api/webchat/rooms/:id/users/:username', requirePg, async (req, res)
     )
     res.json({ ok: true })
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -1485,7 +1546,8 @@ app.get('/api/webchat/history/:roomId', requirePg, async (req, res) => {
     const { rows } = await pgPool.query(query, params)
     res.json(rows)
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -1601,7 +1663,8 @@ app.post('/api/webchat/send', requirePg, async (req, res) => {
 
     res.json({ ok: true, reply: assistantContent })
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -1613,7 +1676,8 @@ app.get('/api/webchat/chat-users', requirePg, async (_req, res) => {
     )
     res.json(rows)
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -1995,7 +2059,8 @@ app.get('/api/monitor/events', async (_req, res) => {
       }
     })
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -2058,7 +2123,8 @@ app.get('/api/agents/:id/sessions', (req, res) => {
     result.sort((a, b) => b.updatedAt - a.updatedAt)
     res.json(result)
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -2174,7 +2240,8 @@ app.get('/api/agents/:id/sessions/:sessionKey(*)', (req, res) => {
       },
     })
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -2254,7 +2321,8 @@ app.get('/api/monitor/cost', (req, res) => {
       },
     })
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -2264,7 +2332,8 @@ app.get('/api/alerting', (req, res) => {
     const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
     res.json(config.alerting || { telegram: { enabled: false, chatId: '' } })
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -2276,7 +2345,8 @@ app.put('/api/alerting', (req, res) => {
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2))
     res.json({ ok: true })
   } catch (e) {
-    res.status(500).json({ error: e.message })
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
   }
 })
 
@@ -2361,8 +2431,21 @@ function runAlertCheck() {
   }
 }
 
-setInterval(runAlertCheck, 60000)
+setInterval(() => {
+  try { runAlertCheck() } catch (e) { console.error('[alert-check]', e.message) }
+}, 60000)
 
-app.listen(PORT, '0.0.0.0', () => {
+const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`OpenClaw API running on port ${PORT}`)
 })
+
+function shutdown(signal) {
+  console.log(`${signal} received — shutting down gracefully`)
+  server.close(() => {
+    if (pgPool) pgPool.end(() => process.exit(0))
+    else process.exit(0)
+  })
+  setTimeout(() => process.exit(1), 10000)
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'))
+process.on('SIGINT',  () => shutdown('SIGINT'))

@@ -240,8 +240,19 @@ function writeUserNames(names) {
 
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || null
 app.use(helmet())
-app.use(cors(ALLOWED_ORIGIN ? { origin: ALLOWED_ORIGIN } : {}))
+app.use(cors(ALLOWED_ORIGIN ? {
+  origin: ALLOWED_ORIGIN,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
+  allowedHeaders: ['Authorization', 'Content-Type'],
+} : {}))
 app.use(express.json({ limit: '1mb' }))
+
+// JSON parse error handler (e.g. 413 PayloadTooLarge, malformed JSON)
+app.use((err, _req, res, next) => {
+  if (err.status === 413) return res.status(413).json({ error: 'Request too large' })
+  if (err.type === 'entity.parse.failed') return res.status(400).json({ error: 'Invalid JSON' })
+  next(err)
+})
 
 // Auth middleware
 app.use((req, res, next) => {

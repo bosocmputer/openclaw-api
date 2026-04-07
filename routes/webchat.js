@@ -199,15 +199,13 @@ router.post('/send', requirePg, async (req, res) => {
 
     if (!hookRes.ok) return res.status(502).json({ error: 'gateway ไม่ตอบสนอง', detail: hookRes })
 
-    // poll จาก sessions.json + .jsonl files โดยตรง (HTTP history endpoint ต้องการ auth แบบอื่น)
+    // poll จาก .jsonl file โดยใช้ runId (reliable กว่า timestamp-based)
     const runId = hookRes.runId
     const sessionsJsonPath = path.join(HOME, `.openclaw/agents/${agentId}/sessions/sessions.json`)
     const fullSessionKey = `agent:${agentId}:${sessionKey}`
     const deadline = Date.now() + 300000 // 5 นาที — รองรับ model ช้า
+    const pollStart = Date.now()
     let assistantContent = null
-    let lastSeenTimestamp = Date.now()
-    let stableContent = null
-    let stableAt = 0
 
     while (Date.now() < deadline) {
       await new Promise(r => setTimeout(r, 1500))
@@ -217,33 +215,71 @@ router.post('/send', requirePg, async (req, res) => {
         if (!sess?.sessionId) continue
         const jsonlPath = path.join(HOME, `.openclaw/agents/${agentId}/sessions/${sess.sessionId}.jsonl`)
         const lines = fs.readFileSync(jsonlPath, 'utf8').trim().split('\n').filter(Boolean)
+
+        // ถ้ามี runId: หา run_complete หรือ reply event ที่ตรง runId
+        // ถ้าไม่มี runId (gateway เก่า): ใช้ timestamp-based เหมือนเดิม
         let found = null
+        let runDone = false
+
         for (let i = lines.length - 1; i >= 0; i--) {
           try {
             const entry = JSON.parse(lines[i])
             const entryTs = new Date(entry.timestamp).getTime()
-            if (entryTs < lastSeenTimestamp) break
-            if (entry.type === 'message' && entry.message?.role === 'assistant') {
-              const textPart = entry.message.content?.find(c => c.type === 'text')
-              if (textPart?.text) { found = textPart.text; break }
+            // ไม่ย้อนเกินกว่าจุดที่เริ่ม poll (ลบ 2 วินาที buffer)
+            if (entryTs < pollStart - 2000) break
+
+            if (runId) {
+              // หา run_complete event ของ runId นี้ → บ่งชี้ว่า run จบแล้ว
+              if (entry.type === 'run_complete' && entry.runId === runId) {
+                runDone = true
+              }
+              // หา assistant message ที่ตรง runId
+              if (entry.type === 'message' && entry.message?.role === 'assistant' && entry.runId === runId) {
+                const textPart = entry.message.content?.find(c => c.type === 'text')
+                if (textPart?.text) { found = textPart.text }
+              }
+            } else {
+              // fallback: ไม่มี runId — เอา assistant message ล่าสุดที่เกิดหลัง poll start
+              if (entry.type === 'message' && entry.message?.role === 'assistant') {
+                const textPart = entry.message.content?.find(c => c.type === 'text')
+                if (textPart?.text) { found = textPart.text; break }
+              }
             }
           } catch { continue }
         }
-        if (found) {
-          if (found === stableContent) {
-            // content ไม่เปลี่ยนแปลงแล้ว — รอ stabilize 2 รอบ (3 วินาที) แล้วถือว่า done
-            if (Date.now() - stableAt >= 3000) { assistantContent = found; break }
-          } else {
-            // content ยังเปลี่ยนอยู่ — อัปเดตและรอต่อ
-            stableContent = found
-            stableAt = Date.now()
-          }
+
+        // ถ้ามี runId: ต้องเจอทั้ง content และ run_complete ก่อนถึง return
+        // ถ้าไม่มี runId: เจอ content ก็พอ
+        if (found && (runDone || !runId)) {
+          assistantContent = found
+          break
         }
+        // กรณีพิเศษ: มี content แต่ยังไม่เจอ run_complete รอต่อ (streaming)
       } catch { /* ยังไม่พร้อม */ }
     }
 
-    // fallback: ใช้ stableContent ถ้า deadline หมดแต่มี content บางส่วน
-    if (!assistantContent && stableContent) assistantContent = stableContent
+    // fallback: ถ้า deadline หมดแต่เจอ content บางส่วนแล้ว ส่งคืนเลย
+    if (!assistantContent) {
+      // scan ครั้งสุดท้ายโดยไม่สนใจ run_complete
+      try {
+        const sessions = JSON.parse(fs.readFileSync(sessionsJsonPath, 'utf8'))
+        const sess = sessions[fullSessionKey]
+        if (sess?.sessionId) {
+          const jsonlPath = path.join(HOME, `.openclaw/agents/${agentId}/sessions/${sess.sessionId}.jsonl`)
+          const lines = fs.readFileSync(jsonlPath, 'utf8').trim().split('\n').filter(Boolean)
+          for (let i = lines.length - 1; i >= 0; i--) {
+            try {
+              const entry = JSON.parse(lines[i])
+              if (new Date(entry.timestamp).getTime() < pollStart - 2000) break
+              if (entry.type === 'message' && entry.message?.role === 'assistant') {
+                const textPart = entry.message.content?.find(c => c.type === 'text')
+                if (textPart?.text) { assistantContent = textPart.text; break }
+              }
+            } catch { continue }
+          }
+        }
+      } catch {}
+    }
 
     if (!assistantContent) return res.status(504).json({ error: 'timeout รอ agent ตอบ' })
 

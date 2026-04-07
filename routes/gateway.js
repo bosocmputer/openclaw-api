@@ -30,6 +30,27 @@ function cleanStaleSessions() {
   }
 }
 
+// POST /api/gateway/clean-sessions — trigger cleanStaleSessions manually
+router.post('/clean-sessions', (req, res) => {
+  cleanStaleSessions()
+  res.json({ ok: true })
+})
+
+// รัน cleanStaleSessions อัตโนมัติทุกวัน ตี 3 (ช่วงที่ไม่มีการใช้งาน)
+const CLEAN_INTERVAL_MS = 24 * 60 * 60 * 1000
+function scheduleDailyClean() {
+  const now = new Date()
+  const next3am = new Date(now)
+  next3am.setHours(3, 0, 0, 0)
+  if (next3am <= now) next3am.setDate(next3am.getDate() + 1)
+  const msUntil3am = next3am - now
+  setTimeout(() => {
+    cleanStaleSessions()
+    setInterval(cleanStaleSessions, CLEAN_INTERVAL_MS)
+  }, msUntil3am)
+}
+scheduleDailyClean()
+
 // POST /api/gateway/restart — restart gateway
 router.post('/restart', (req, res) => {
   cleanStaleSessions()

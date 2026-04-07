@@ -23,7 +23,7 @@ app.use(cors(ALLOWED_ORIGIN ? {
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
   allowedHeaders: ['Authorization', 'Content-Type'],
 } : {}))
-app.use(express.json({ limit: '1mb' }))
+app.use(express.json({ limit: '10mb' }))
 
 // JSON parse error handler (e.g. 413 PayloadTooLarge, malformed JSON)
 app.use((err, _req, res, next) => {
@@ -54,6 +54,9 @@ app.use('/api/webchat',   require('./routes/webchat').router)
 app.use('/api/monitor',   monitorRouter)
 app.use('/api/agents',    agentSessionsRouter)            // mounts /api/agents/:id/sessions/*
 app.use('/api/alerting',  alertingRouter)
+app.use('/api/webhooks',  require('./routes/webhooks'))
+app.use('/api/compaction', require('./routes/compaction'))
+app.use('/api/memory',    require('./routes/memory'))
 
 // ─── Alert watcher ────────────────────────────────────────────────────────────
 startAlertWatcher()

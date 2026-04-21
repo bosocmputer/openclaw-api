@@ -224,6 +224,7 @@ router.post('/send', requirePg, async (req, res) => {
         // อ่านจากท้ายไปหัว หา assistant message ล่าสุดที่อยู่หลัง pollBaseline
         let found = null
         let foundTs = 0
+        let foundHasToolUse = false
         for (let i = lines.length - 1; i >= 0; i--) {
           try {
             const entry = JSON.parse(lines[i])
@@ -231,13 +232,24 @@ router.post('/send', requirePg, async (req, res) => {
             if (entryTs < pollBaseline) break // เก่าเกินไป หยุด
             if (entry.type === 'message' && entry.message?.role === 'assistant') {
               const textPart = entry.message.content?.find(c => c.type === 'text')
-              if (textPart?.text) { found = textPart.text; foundTs = entryTs; break }
+              if (textPart?.text) {
+                found = textPart.text
+                foundTs = entryTs
+                // ตรวจว่า message นี้ยังมี tool_use ค้างอยู่ไหม (agent ยังไม่เสร็จ)
+                foundHasToolUse = entry.message.content?.some(c => c.type === 'tool_use') ?? false
+                break
+              }
             }
           } catch { continue }
         }
 
         if (found) {
-          if (found === lastKnownContent && foundTs === lastKnownTs) {
+          if (foundHasToolUse) {
+            // assistant กำลังรอ tool result → ยังไม่เสร็จ ห้ามนับ stable
+            stableRounds = 0
+            lastKnownContent = found
+            lastKnownTs = foundTs
+          } else if (found === lastKnownContent && foundTs === lastKnownTs) {
             // content เหมือนเดิม 2 poll รอบ (~3 วินาที) → ถือว่า streaming จบแล้ว
             stableRounds++
             if (stableRounds >= 2) { assistantContent = found; break }

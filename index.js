@@ -57,6 +57,7 @@ app.use('/api/alerting',  alertingRouter)
 app.use('/api/webhooks',  require('./routes/webhooks'))
 app.use('/api/compaction', require('./routes/compaction'))
 app.use('/api/memory',    require('./routes/memory'))
+app.use('/api/sale-orders', require('./routes/sale-orders'))
 
 // ─── Alert watcher ────────────────────────────────────────────────────────────
 startAlertWatcher()

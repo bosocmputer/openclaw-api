@@ -110,7 +110,7 @@ function runAlertCheck() {
 function startAlertWatcher() {
   setInterval(() => {
     try { runAlertCheck() } catch (e) { console.error('[alert-check]', e.message) }
-  }, 60000)
+  }, 30000) // ลดจาก 60s เป็น 30s เพื่อรองรับ noResponseSec ที่ตั้งต่ำ
 }
 
 // GET /api/alerting — get alerting config

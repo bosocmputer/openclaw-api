@@ -52,6 +52,29 @@ function runAlertCheck() {
       }
       alertState[stateKey].aborted = info.abortedLastRun === true
 
+      // Check no-response timeout — agent กำลัง thinking นานเกินกำหนด
+      const noResponseSec = alertConfig.noResponseSec ?? 0
+      if (noResponseSec > 0) {
+        const thinkingSince = alertState[stateKey].thinkingSince
+        if (info.state === 'thinking' || info.runActive === true) {
+          if (!thinkingSince) {
+            alertState[stateKey].thinkingSince = now
+          } else if (now - thinkingSince > noResponseSec * 1000) {
+            if (now - (alertState[stateKey].noResponseAlert || 0) > cooldown) {
+              const label = key.replace(/^agent:[^:]+:/, '')
+              const elapsedSec = Math.round((now - thinkingSince) / 1000)
+              sendTelegramAlert(botToken, alertConfig.chatId,
+                `⏰ <b>OpenClaw Alert — ไม่ตอบ ${elapsedSec}s</b>\n\nAgent: <code>${agent.id}</code>\nSession: <code>${label}</code>\n\nกำลัง thinking นานกว่า ${noResponseSec} วินาที — อาจมีปัญหา`)
+              alertState[stateKey].noResponseAlert = now
+            }
+          }
+        } else {
+          // ตอบแล้ว reset
+          alertState[stateKey].thinkingSince = null
+          alertState[stateKey].noResponseAlert = null
+        }
+      }
+
       // Check stopReason of last assistant message
       const sessionFile = info.sessionFile
         || (info.sessionId ? path.join(HOME, `.openclaw/agents/${agent.id}/sessions/${info.sessionId}.jsonl`) : null)

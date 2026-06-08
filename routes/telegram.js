@@ -66,6 +66,42 @@ router.get('/botinfo', async (req, res) => {
   }
 })
 
+// GET /api/telegram/status — เช็คสถานะ bot แต่ละ account (online/offline + ชื่อ)
+router.get('/status', async (req, res) => {
+  try {
+    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
+    const tg = config.channels?.telegram || {}
+    const accounts = {}
+
+    async function checkBot(token) {
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(), 4000)
+      try {
+        const r = await fetch(`https://api.telegram.org/bot${token}/getMe`, { signal: controller.signal })
+        const j = await r.json()
+        return j.ok
+          ? { online: true, name: j.result.first_name || j.result.username, username: j.result.username }
+          : { online: false, name: null, username: null }
+      } catch {
+        return { online: false, name: null, username: null }
+      } finally {
+        clearTimeout(timer)
+      }
+    }
+
+    for (const [id, acc] of Object.entries(tg.accounts || {})) {
+      if (acc.botToken) accounts[id] = await checkBot(acc.botToken)
+    }
+    if (!accounts['default'] && tg.botToken) {
+      accounts['default'] = await checkBot(tg.botToken)
+    }
+    res.json(accounts)
+  } catch (e) {
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
 // POST /api/telegram/accounts — เพิ่ม bot account ใหม่
 router.post('/accounts', (req, res) => {
   try {

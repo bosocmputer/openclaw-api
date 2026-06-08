@@ -42,6 +42,7 @@ function generateState() {
 
 function parseRedirectUrl(input) {
   // รับ URL เต็ม หรือ query string หรือ code ล้วน
+  // รองรับทั้ง: localhost:53692/callback?code=... และ chang168.../oauth/callback?code=...
   try {
     const url = new URL(input)
     const code = url.searchParams.get('code')
@@ -50,7 +51,8 @@ function parseRedirectUrl(input) {
   } catch {}
   // ลอง parse เป็น query string
   try {
-    const params = new URLSearchParams(input.includes('?') ? input.split('?')[1] : input)
+    const queryPart = input.includes('?') ? input.split('?')[1] : input
+    const params = new URLSearchParams(queryPart)
     const code = params.get('code')
     const state = params.get('state')
     if (code) return { code, state }

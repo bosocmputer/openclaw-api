@@ -42,6 +42,7 @@ app.use((req, res, next) => {
 // ─── Routes ───────────────────────────────────────────────────────────────────
 app.use('/api/status',    require('./routes/status'))
 app.use('/api/config',    require('./routes/config'))
+app.use('/api/auth',      require('./routes/auth'))
 app.use('/api/agents',    require('./routes/agents'))
 app.use('/api/telegram',  require('./routes/telegram'))
 app.use('/api/line',      require('./routes/line'))

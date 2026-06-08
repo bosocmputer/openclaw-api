@@ -162,6 +162,9 @@ router.post('/send', requirePg, async (req, res) => {
     const sessionKey = `hook:webchat:uid:${username}`
 
     // บันทึก user message ก่อน
+    // pollBaseline ตั้งไว้ก่อนบันทึก — ป้องกัน reply ของ message ก่อนหน้ารั่วเข้ามา
+    const pollBaseline = Date.now() - 1000 // 1 วินาที buffer (ลดจาก 5 วินาที เพื่อไม่ให้ overlap กับ reply ก่อนหน้า)
+
     await pgPool.query(
       'INSERT INTO webchat_messages (room_id, username, role, content) VALUES ($1, $2, $3, $4)',
       [roomId, username, 'user', message]
@@ -206,7 +209,6 @@ router.post('/send', requirePg, async (req, res) => {
     const sessionsJsonPath = path.join(HOME, `.openclaw/agents/${agentId}/sessions/sessions.json`)
     const fullSessionKey = `agent:${agentId}:${sessionKey}`
     const deadline = Date.now() + 300000 // 5 นาที — รองรับ model ช้า
-    const pollBaseline = Date.now() - 5000 // 5 วินาที buffer ก่อนหน้า
     let assistantContent = null
     let lastKnownContent = null // assistant reply ล่าสุดที่เห็น
     let lastKnownTs = 0

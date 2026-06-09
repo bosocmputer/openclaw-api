@@ -156,8 +156,8 @@ router.post('/anthropic/submit', async (req, res) => {
 
     if (!tokenResponse.ok) {
       const body = await tokenResponse.text().catch(() => '')
-      console.error('[openclaw-api] token exchange failed', tokenResponse.status, body)
-      return res.status(502).json({ error: `Anthropic token exchange failed (${tokenResponse.status})` })
+      console.error('[openclaw-api] token exchange failed', tokenResponse.status, body.slice(0, 500))
+      return res.status(502).json({ error: `Anthropic token exchange failed (${tokenResponse.status}): ${body.slice(0, 200)}` })
     }
 
     const tokenData = await tokenResponse.json()

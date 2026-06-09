@@ -11,7 +11,8 @@
 const router = require('express').Router()
 const crypto = require('crypto')
 const fs = require('fs')
-const { CONFIG_PATH } = require('../lib/config')
+const path = require('path')
+const { CONFIG_PATH, HOME } = require('../lib/config')
 
 const CLIENT_ID = Buffer.from('OWQxYzI1MGEtZTYxYi00NGQ5LTg4ZWQtNTk0NGQxOTYyZjVl', 'base64').toString('utf8')
 const AUTHORIZE_URL = 'https://claude.ai/oauth/authorize'
@@ -19,8 +20,25 @@ const TOKEN_URL = 'https://platform.claude.com/v1/oauth/token'
 const REDIRECT_URI = 'http://localhost:53692/callback'
 const SCOPES = 'org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload'
 
-// เก็บ session state ชั่วคราว (in-memory, 1 session ต่อครั้ง, TTL 10 นาที)
-let pendingSession = null
+// เก็บ session ลงไฟล์ (ทนต่อ pm2 restart)
+const SESSION_FILE = path.join(HOME, '.openclaw', 'oauth-pending.json')
+
+function savePendingSession(session) {
+  try { fs.writeFileSync(SESSION_FILE, JSON.stringify(session), { mode: 0o600 }) } catch {}
+}
+
+function loadPendingSession() {
+  try {
+    const s = JSON.parse(fs.readFileSync(SESSION_FILE, 'utf8'))
+    if (s && Date.now() < s.expiresAt) return s
+    clearPendingSession()
+    return null
+  } catch { return null }
+}
+
+function clearPendingSession() {
+  try { fs.unlinkSync(SESSION_FILE) } catch {}
+}
 
 // ─── PKCE helpers (Web Crypto API — available in Node.js 18+) ────────────────
 
@@ -67,12 +85,12 @@ router.post('/anthropic/start', async (req, res) => {
     const { verifier, challenge } = await generatePKCE()
     const state = generateState()
 
-    // เก็บ session ชั่วคราว (TTL 10 นาที)
-    pendingSession = {
+    // เก็บ session ลงไฟล์ (TTL 10 นาที — ทนต่อ pm2 restart)
+    savePendingSession({
       verifier,
       state,
       expiresAt: Date.now() + 10 * 60 * 1000,
-    }
+    })
 
     const authParams = new URLSearchParams({
       code: 'true',
@@ -105,9 +123,9 @@ router.post('/anthropic/submit', async (req, res) => {
     const { redirectUrl } = req.body
     if (!redirectUrl) return res.status(400).json({ error: 'redirectUrl required' })
 
-    if (!pendingSession || Date.now() > pendingSession.expiresAt) {
-      pendingSession = null
-      return res.status(400).json({ error: 'Session expired — กรุณากด Start ใหม่' })
+    const pendingSession = loadPendingSession()
+    if (!pendingSession) {
+      return res.status(400).json({ error: 'Session expired — กรุณากด "เชื่อมต่อ" ใหม่อีกครั้ง' })
     }
 
     const { code, state } = parseRedirectUrl(redirectUrl)
@@ -115,12 +133,12 @@ router.post('/anthropic/submit', async (req, res) => {
 
     // ตรวจ state เพื่อป้องกัน CSRF (ถ้ามี)
     if (state && state !== pendingSession.state) {
-      pendingSession = null
-      return res.status(400).json({ error: 'State mismatch — อาจมีปัญหาด้าน security กรุณาลองใหม่' })
+      clearPendingSession()
+      return res.status(400).json({ error: 'State mismatch — กรุณากด "เชื่อมต่อ" ใหม่' })
     }
 
     const { verifier } = pendingSession
-    pendingSession = null
+    clearPendingSession()
 
     // แลก code → access_token
     const tokenResponse = await fetch(TOKEN_URL, {

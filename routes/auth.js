@@ -141,16 +141,19 @@ router.post('/anthropic/submit', async (req, res) => {
     clearPendingSession()
 
     // แลก code → access_token
+    const tokenBody = {
+      grant_type: 'authorization_code',
+      client_id: CLIENT_ID,
+      code,
+      state: state || pendingSession.state,
+      redirect_uri: REDIRECT_URI,
+      code_verifier: verifier,
+    }
+    console.log('[openclaw-api] token exchange body keys:', Object.keys(tokenBody))
     const tokenResponse = await fetch(TOKEN_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        grant_type: 'authorization_code',
-        client_id: CLIENT_ID,
-        code,
-        redirect_uri: REDIRECT_URI,
-        code_verifier: verifier,
-      }),
+      body: JSON.stringify(tokenBody),
       signal: AbortSignal.timeout(15000),
     })
 

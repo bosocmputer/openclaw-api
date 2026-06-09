@@ -130,6 +130,16 @@ router.post('/models/test', async (req, res) => {
     } else if (provider === 'anthropic') {
       url = 'https://api.anthropic.com/v1/models'
       headers = { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' }
+    } else if (provider === 'anthropic-oauth') {
+      // OAuth token (sk-ant-oat...) ต้องใช้ Bearer + beta headers เหมือน Claude Code
+      url = 'https://api.anthropic.com/v1/models'
+      headers = {
+        'Authorization': `Bearer ${apiKey}`,
+        'anthropic-version': '2023-06-01',
+        'anthropic-beta': 'claude-code-20250219,oauth-2025-04-20',
+        'user-agent': 'claude-cli/2.1.75',
+        'x-app': 'cli',
+      }
     } else if (provider === 'google') {
       url = `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`
     } else if (provider === 'openai') {

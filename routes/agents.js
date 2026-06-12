@@ -5,19 +5,50 @@ const { HOME, CONFIG_PATH } = require('../lib/config')
 const { readUserNames, writeUserNames } = require('../lib/files')
 const { generateSoulTemplate } = require('../lib/soul-template')
 
+// ─── openclaw mcp helpers — ใช้ openclaw.json mcp.servers โดยตรง ───────────────
+function _readOcJson() {
+  return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
+}
+function _writeOcJson(d) {
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify(d, null, 2))
+}
+// server name ใน openclaw.json mcp.servers = agentId
+function _mcpServerName(agentId) { return agentId }
+// แปลง UI format → openclaw mcp.servers entry
+function _toOcServer(s) {
+  const url = s.url ?? ''
+  const transport = url.includes('/sse') ? 'sse' : 'streamable-http'
+  const r = { url, transport }
+  if (s.headers && Object.keys(s.headers).length) r.headers = s.headers
+  return r
+}
+// แปลง openclaw mcp.servers entry → UI format
+function _fromOcServer(name, s) {
+  return { type: 'http', url: s.url, allowHttp: true, headers: s.headers ?? {} }
+}
+// หา MCP server ของ agent จาก openclaw.json (รองรับ sml-{id} legacy)
+function _getOcServer(agentId) {
+  const ocJson = _readOcJson()
+  const name = _mcpServerName(agentId)
+  return ocJson.mcp?.servers?.[name] ?? ocJson.mcp?.servers?.['sml-' + name] ?? null
+}
+
 // GET /api/agents — รายการ agents พร้อม soul, mcp, users
 router.get('/', (req, res) => {
   try {
     const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
+    const ocJson = _readOcJson()
     const agents = (config.agents?.list || []).map(agent => {
       const workspacePath = agent.workspace.replace('~', HOME)
       const soulPath = path.join(workspacePath, 'SOUL.md')
-      const mcpPath = path.join(workspacePath, 'config/mcporter.json')
+      const name = _mcpServerName(agent.id)
+      const ocServer = ocJson.mcp?.servers?.[name] ?? ocJson.mcp?.servers?.['sml-' + name]
+      const mcp = ocServer ? { mcpServers: { [name]: _fromOcServer(name, ocServer) } } : null
       return {
         id: agent.id,
         workspace: agent.workspace,
         soul: fs.existsSync(soulPath) ? fs.readFileSync(soulPath, 'utf8') : '',
-        mcp: fs.existsSync(mcpPath) ? JSON.parse(fs.readFileSync(mcpPath, 'utf8')) : null,
+        mcp,
         users: (config.bindings || [])
           .filter(b => b.agentId === agent.id)
           .map(b => b.match?.peer ? { id: b.match.peer.id, name: readUserNames()[b.match.peer.id] } : null)
@@ -31,7 +62,7 @@ router.get('/', (req, res) => {
   }
 })
 
-// POST /api/agents — เพิ่ม agent ใหม่ (auto-generate SOUL + mcporter.json จาก template)
+// POST /api/agents — เพิ่ม agent ใหม่
 router.post('/', (req, res) => {
   try {
     const { id, workspace, accessMode = 'general' } = req.body
@@ -42,20 +73,13 @@ router.post('/', (req, res) => {
     if (config.agents.list.find(a => a.id === id))
       return res.status(400).json({ error: 'Agent already exists' })
     config.agents.list.push({ id, workspace })
-    // สร้าง workspace directory
     const workspacePath = workspace.replace('~', HOME)
     fs.mkdirSync(path.join(workspacePath, 'config'), { recursive: true })
-    fs.mkdirSync(path.join(workspacePath, 'skills/mcporter'), { recursive: true })
-    // auto-generate SOUL.md จาก template (ใช้ ~ path เพื่อรองรับทุก server)
     const workspaceTilde = workspace.startsWith(HOME)
       ? workspace.replace(HOME, '~')
       : workspace
-    // ดึง MCP URL จาก mcporter.json ถ้ามี
-    const newMcpPath = path.join(workspacePath, 'config/mcporter.json')
-    const newMcpConfig = fs.existsSync(newMcpPath) ? JSON.parse(fs.readFileSync(newMcpPath, 'utf8')) : {}
-    const newMcpServer = Object.values(newMcpConfig.mcpServers ?? {})[0]
-    const mcpUrl = newMcpServer?.url ?? null
-    const soul = generateSoulTemplate(workspaceTilde, accessMode, mcpUrl)
+    // ไม่สร้าง mcporter.json อีกต่อไป — ใช้ openclaw mcp ผ่าน UI แทน
+    const soul = generateSoulTemplate(workspaceTilde, accessMode, null)
     fs.writeFileSync(path.join(workspacePath, 'SOUL.md'), soul)
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2))
     res.json({ ok: true })
@@ -71,12 +95,10 @@ router.get('/:id/soul/template', (req, res) => {
     const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
     const agent = config.agents?.list?.find(a => a.id === req.params.id)
     if (!agent) return res.status(404).json({ error: 'Agent not found' })
-    const mcpPath = path.join(agent.workspace.replace('~', HOME), 'config/mcporter.json')
-    const mcpConfig = fs.existsSync(mcpPath) ? JSON.parse(fs.readFileSync(mcpPath, 'utf8')) : {}
-    const server = Object.values(mcpConfig.mcpServers ?? {})[0]
-    // รองรับทั้ง headers (ใหม่) และ env (เก่า)
-    const accessMode = server?.headers?.['mcp-access-mode'] ?? server?.env?.MCP_ACCESS_MODE ?? 'general'
-    const mcpUrl = server?.url ?? null
+    // อ่าน accessMode จาก openclaw.json mcp.servers
+    const ocServer = _getOcServer(req.params.id)
+    const accessMode = ocServer?.headers?.['mcp-access-mode'] ?? 'general'
+    const mcpUrl = ocServer?.url ?? null
     const workspaceTilde = agent.workspace.startsWith(HOME)
       ? agent.workspace.replace(HOME, '~')
       : agent.workspace
@@ -137,29 +159,38 @@ router.put('/:id/soul', (req, res) => {
   }
 })
 
-// GET /api/agents/:id/mcp — อ่าน mcporter.json
+// GET /api/agents/:id/mcp — อ่านจาก openclaw.json mcp.servers
 router.get('/:id/mcp', (req, res) => {
   try {
     const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
-    const agent = config.agents?.list?.find(a => a.id === req.params.id)
-    if (!agent) return res.status(404).json({ error: 'Agent not found' })
-    const mcpPath = path.join(agent.workspace.replace('~', HOME), 'config/mcporter.json')
-    res.json(fs.existsSync(mcpPath) ? JSON.parse(fs.readFileSync(mcpPath, 'utf8')) : {})
+    if (!config.agents?.list?.find(a => a.id === req.params.id))
+      return res.status(404).json({ error: 'Agent not found' })
+    const name = _mcpServerName(req.params.id)
+    const ocServer = _getOcServer(req.params.id)
+    if (!ocServer) return res.json({})
+    res.json({ mcpServers: { [name]: _fromOcServer(name, ocServer) } })
   } catch (e) {
     console.error('[openclaw-api]', req.method, req.path, e.message)
     res.status(500).json({ error: 'Internal server error' })
   }
 })
 
-// PUT /api/agents/:id/mcp — เขียน mcporter.json
+// PUT /api/agents/:id/mcp — เขียนลง openclaw.json mcp.servers (hot-reload อัตโนมัติ)
 router.put('/:id/mcp', (req, res) => {
   try {
     const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
     const agent = config.agents?.list?.find(a => a.id === req.params.id)
     if (!agent) return res.status(404).json({ error: 'Agent not found' })
-    const mcpDir = path.join(agent.workspace.replace('~', HOME), 'config')
-    fs.mkdirSync(mcpDir, { recursive: true })
-    fs.writeFileSync(path.join(mcpDir, 'mcporter.json'), JSON.stringify(req.body, null, 2))
+    const firstServer = Object.values(req.body.mcpServers ?? {})[0]
+    if (!firstServer?.url) return res.status(400).json({ error: 'url required in mcpServers' })
+    const ocJson = _readOcJson()
+    if (!ocJson.mcp) ocJson.mcp = {}
+    if (!ocJson.mcp.servers) ocJson.mcp.servers = {}
+    const name = _mcpServerName(req.params.id)
+    // ลบ legacy sml-{agentId} entry ถ้ามี
+    delete ocJson.mcp.servers['sml-' + name]
+    ocJson.mcp.servers[name] = _toOcServer(firstServer)
+    _writeOcJson(ocJson)
     res.json({ ok: true })
   } catch (e) {
     console.error('[openclaw-api]', req.method, req.path, e.message)
@@ -167,34 +198,26 @@ router.put('/:id/mcp', (req, res) => {
   }
 })
 
-// POST /api/agents/:id/mcp/test — ทดสอบ MCP พร้อม MCP_ACCESS_MODE จริง
-// body: { accessMode?: string } — ถ้าส่งมาจะ override ค่าใน mcporter.json
+// POST /api/agents/:id/mcp/test — ทดสอบ MCP จาก openclaw.json mcp.servers
+// body: { accessMode?: string } — override ถ้าต้องการ
 router.post('/:id/mcp/test', (req, res) => {
   try {
     const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
-    const agent = config.agents?.list?.find(a => a.id === req.params.id)
-    if (!agent) return res.status(404).json({ error: 'Agent not found' })
-    const mcpPath = path.join(agent.workspace.replace('~', HOME), 'config/mcporter.json')
-    if (!fs.existsSync(mcpPath)) return res.status(400).json({ error: 'mcporter.json not found — save MCP config first' })
-    const mcpConfig = JSON.parse(fs.readFileSync(mcpPath, 'utf8'))
-    const serverName = Object.keys(mcpConfig.mcpServers ?? {})[0]
-    if (!serverName) return res.status(400).json({ error: 'No MCP server configured' })
-
-    const overrideMode = req.body?.accessMode
-    const effectiveMode = overrideMode ?? mcpConfig.mcpServers[serverName]?.headers?.['mcp-access-mode'] ?? 'general'
-
-    // Derive base URL from server URL (strip /call or /sse path suffix)
-    const serverUrl = mcpConfig.mcpServers[serverName]?.url ?? ''
-    const baseUrl = serverUrl.replace(/\/(call|sse)(\/.*)?$/, '')
-    if (!baseUrl) return res.status(400).json({ error: 'MCP server URL not configured' })
-    const toolsUrl = `${baseUrl}/tools`
-
-    fetch(toolsUrl, { headers: { 'mcp-access-mode': effectiveMode } })
+    if (!config.agents?.list?.find(a => a.id === req.params.id))
+      return res.status(404).json({ error: 'Agent not found' })
+    const ocServer = _getOcServer(req.params.id)
+    if (!ocServer?.url) return res.status(400).json({ error: 'No MCP server configured — save config first' })
+    const name = _mcpServerName(req.params.id)
+    const effectiveMode = req.body?.accessMode ?? ocServer.headers?.['mcp-access-mode'] ?? 'general'
+    const baseUrl = ocServer.url.replace(/\/(call|sse|mcp)(\/.*)?$/, '')
+    fetch(baseUrl + '/tools', { headers: { 'mcp-access-mode': effectiveMode } })
       .then(r => r.json())
       .then(data => {
         const list = Array.isArray(data) ? data : (data.tools ?? [])
-        const tools = list.map(t => ({ name: t.name, description: t.description ?? '' }))
-        res.json({ ok: true, serverName, accessMode: effectiveMode, tools })
+        res.json({
+          ok: true, serverName: name, accessMode: effectiveMode,
+          tools: list.map(t => ({ name: t.name, description: t.description ?? '' }))
+        })
       })
       .catch(err => res.status(500).json({ error: err.message }))
   } catch (e) {

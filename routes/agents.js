@@ -110,6 +110,10 @@ router.get('/:id/soul/template', async (req, res) => {
     const toolResult = await getMcpTools({ accessMode: requestedAccessMode, mcpUrl, refresh: refreshTools })
     const accessMode = toolResult.accessMode
     const soul = generateSoulTemplate(workspaceTilde, accessMode, mcpUrl, persona, toolResult)
+    const warnings = [...(toolResult.warnings || [])]
+    if (accessMode === 'stock' && !/workflowContract=stock-flow-v1\b/.test(soul)) {
+      warnings.push('Template missing stock-flow-v1 workflow contract')
+    }
     res.json({
       soul,
       accessMode,
@@ -119,7 +123,7 @@ router.get('/:id/soul/template', async (req, res) => {
       tools: toolResult.tools,
       capabilities: toolResult.capabilities,
       deniedCapabilities: toolResult.deniedCapabilities,
-      warnings: toolResult.warnings,
+      warnings,
       generatedAt: toolResult.generatedAt,
       cache: toolResult.cache,
     })

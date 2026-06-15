@@ -88,6 +88,18 @@ bash scripts/update-server.sh --dry-run
 bash scripts/update-server.sh --apply --mcp-url http://192.168.2.248:3515/sse --openrouter-key "$OPENROUTER_KEY"
 ```
 
+Production artifact flow:
+
+```bash
+cd /Users/nontawatwongnuk/dev/openclaw-api
+bash scripts/package-release-artifact.sh --runtime-dist-dir /path/to/openclaw/dist --output /tmp/openclaw-release.tgz
+scp /tmp/openclaw-release.tgz bosscatdog@192.168.2.109:/tmp/
+ssh bosscatdog@192.168.2.109 'cd ~/openclaw-api && bash scripts/update-server.sh --dry-run --artifact /tmp/openclaw-release.tgz'
+ssh bosscatdog@192.168.2.109 'cd ~/openclaw-api && bash scripts/update-server.sh --apply --artifact /tmp/openclaw-release.tgz'
+```
+
+รายละเอียด rollback, support bundle, Telegram latency watch, และ kill switches อยู่ใน [`RUNBOOK.md`](./RUNBOOK.md)
+
 ---
 
 ## Project Structure
@@ -112,7 +124,7 @@ openclaw-api/
     ├── gateway.js        ← /api/gateway/*, /api/doctor/*, /api/usernames
     ├── members.js        ← /api/members/* (admin user CRUD, bcrypt, PostgreSQL)
     ├── webchat.js        ← /api/webchat/* (rooms, history, send+poll, PostgreSQL)
-    ├── monitor.js        ← /api/monitor/events, /api/monitor/cost, /api/agents/:id/sessions/*
+    ├── monitor.js        ← /api/monitor/events, /api/monitor/latency, /api/monitor/cost, /api/agents/:id/sessions/*
     ├── alerting.js       ← GET/PUT /api/alerting + runAlertCheck interval (60s)
     ├── webhooks.js       ← CRUD /api/webhooks (plugins.entries.webhooks.config.routes)
     ├── compaction.js     ← /api/compaction/checkpoints/:agentId, /api/compaction/restore
@@ -130,6 +142,7 @@ openclaw-api/
 | GET | `/api/status` | gateway online/offline |
 | GET | `/api/system/health?refresh=false` | bounded cached system health |
 | GET | `/api/system/support-bundle` | redacted support bundle |
+| GET | `/api/monitor/latency?minutes=60&channel=telegram` | bounded Telegram latency timeline |
 | GET | `/api/config` | อ่าน openclaw.json |
 | PUT | `/api/config` | เขียน openclaw.json (atomic write) |
 

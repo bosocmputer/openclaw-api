@@ -7,6 +7,7 @@ const { readUserNames } = require('../lib/files')
 const { pgPool } = require('../lib/pg')
 const { stripGatewayMetadata } = require('./webchat')
 const { readOpenclawConfig } = require('../lib/openclaw-config')
+const { buildLatencyFromGatewayLog } = require('../lib/monitor-latency')
 
 const MAX_TAIL_BYTES = 1024 * 1024
 const MAX_EVENTS_LINES = 80
@@ -60,6 +61,7 @@ function normalizeSessionEntry(entry) {
       provider: entry.message.provider,
       model: entry.message.model,
       stopReason: entry.message.stopReason,
+      errorMessage: entry.message.errorMessage ?? entry.errorMessage,
     }
   }
   // flat format: {role, content, timestamp}
@@ -99,6 +101,101 @@ function parseToolNotFound(text) {
   return match[1]
 }
 
+function extractMessageText(msg) {
+  const c = msg?.content
+  if (typeof c === 'string') return c
+  if (Array.isArray(c)) {
+    return c.map(item => {
+      if (typeof item === 'string') return item
+      if (item?.type === 'text' && typeof item.text === 'string') return item.text
+      if (typeof item?.text === 'string') return item.text
+      return ''
+    }).filter(Boolean).join('\n').trim()
+  }
+  return ''
+}
+
+function detectModelError(msg) {
+  if (!msg || msg.role !== 'assistant') return null
+  const text = [msg.errorMessage, extractMessageText(msg)]
+    .filter(Boolean)
+    .join('\n')
+  const stopReason = String(msg.stopReason || '').toLowerCase()
+  if (stopReason !== 'error' && !text) return null
+  if (/timed out|timeout|finish_reason:\s*error|provider finish_reason:\s*error/i.test(text)) {
+    return {
+      type: 'model_timeout',
+      summary: 'Model/provider timeout or finish_reason error',
+      detail: text.slice(0, 500),
+    }
+  }
+  if (stopReason === 'error' || /llm|model|provider|openrouter/i.test(text)) {
+    return {
+      type: 'model_error',
+      summary: 'Model/provider returned an error',
+      detail: text.slice(0, 500),
+    }
+  }
+  return null
+}
+
+function detectReplyQualityWarnings(text) {
+  const value = String(text || '')
+  const warnings = []
+  if (/\{\{\s*[^}\n]{1,80}\s*\}\}/.test(value)) {
+    warnings.push({
+      type: 'reply_quality_warning',
+      issue: 'placeholder_artifact',
+      summary: 'Assistant reply contains placeholder artifact like {{1}}',
+    })
+  }
+  if (/What would you like to do next|Check stock for another product|Search for a different product/i.test(value)) {
+    warnings.push({
+      type: 'reply_quality_warning',
+      issue: 'english_followup',
+      summary: 'Assistant reply contains English follow-up menu',
+    })
+  }
+  if (/[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af]/u.test(value)) {
+    warnings.push({
+      type: 'reply_quality_warning',
+      issue: 'cjk_text',
+      summary: 'Assistant reply contains unexpected CJK text',
+    })
+  }
+  if (/\b(?:khác|khong|không|xin|vui\s+lòng|cảm\s+ơn|hay|hãy)\b/iu.test(value)) {
+    warnings.push({
+      type: 'reply_quality_warning',
+      issue: 'foreign_text',
+      summary: 'Assistant reply contains unexpected foreign-language fragment',
+    })
+  }
+  if (/คุณต้องการดำเนินการต่ออย่างไรครับ[\s\S]*•/.test(value)) {
+    warnings.push({
+      type: 'reply_quality_warning',
+      issue: 'unsolicited_followup_list',
+      summary: 'Assistant reply contains unsolicited follow-up bullet list',
+    })
+  }
+  const normalizedLines = value
+    .split('\n')
+    .map(line => line.replace(/\s+/g, ' ').trim())
+    .filter(line => line.length >= 18)
+  const seen = new Set()
+  for (const line of normalizedLines) {
+    if (seen.has(line)) {
+      warnings.push({
+        type: 'reply_quality_warning',
+        issue: 'duplicate_block',
+        summary: 'Assistant reply contains duplicated text',
+      })
+      break
+    }
+    seen.add(line)
+  }
+  return warnings
+}
+
 function summarizeToolLoopWarnings(toolNotFoundCounts) {
   return Object.entries(toolNotFoundCounts)
     .filter(([, count]) => count >= 2)
@@ -110,8 +207,31 @@ function summarizeToolLoopWarnings(toolNotFoundCounts) {
     }))
 }
 
+// GET /api/monitor/latency — bounded Telegram latency timeline from gateway logs
+router.get('/latency', (req, res) => {
+  try {
+    const minutes = Math.min(Math.max(parseInt(req.query.minutes || '60', 10), 1), 1440)
+    const agent = req.query.agent ? String(req.query.agent) : undefined
+    const channel = req.query.channel ? String(req.query.channel) : 'telegram'
+    if (channel !== 'telegram') {
+      return res.json({
+        generatedAt: new Date().toISOString(),
+        windowMinutes: minutes,
+        summary: { count: 0, ackP50Ms: null, ackP95Ms: null, finalP50Ms: null, finalP95Ms: null, byStatus: {}, slo: { ackP95Ok: null, finalTextP95Ok: null } },
+        turns: [],
+        slowest: [],
+        warnings: [{ type: 'unsupported_channel', summary: 'Latency timeline currently supports Telegram gateway markers only' }],
+      })
+    }
+    res.json(buildLatencyFromGatewayLog({ minutes, agent }))
+  } catch (e) {
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
 // GET /api/monitor/events — real-time session state across all agents and channels
-router.get('/events', async (_req, res) => {
+router.get('/events', async (req, res) => {
   try {
     // Read agents from openclaw.json
     let config = {}
@@ -227,6 +347,7 @@ router.get('/events', async (_req, res) => {
           // Check for error in last assistant message
           const hasError = (() => {
             if (!lastMsg) return false
+            if (detectModelError(lastMsg)) return true
             const c = lastMsg.content
             if (Array.isArray(c)) return c.some(x => x.type === 'error' || (typeof x.text === 'string' && x.text.toLowerCase().includes('error')))
             if (typeof c === 'string') return c.toLowerCase().includes('error')
@@ -236,6 +357,7 @@ router.get('/events', async (_req, res) => {
         } else if (lastMsgRole === 'assistant') {
           const hasError = (() => {
             if (!lastMsg) return false
+            if (detectModelError(lastMsg)) return true
             const c = lastMsg.content
             if (Array.isArray(c)) return c.some(x => x.type === 'error')
             return false
@@ -302,6 +424,9 @@ router.get('/events', async (_req, res) => {
         // Build events array from messages (with latency, token usage, and tool result pairing)
         const events = []
         const toolNotFoundCounts = {}
+        const modelWarnings = []
+        const replyQualityWarnings = []
+        const toolChain = []
         let lastUserTsMs = null
         for (const msg of filtered) {
           const msgTs = msg.timestamp || msg.ts
@@ -318,6 +443,17 @@ router.get('/events', async (_req, res) => {
             }
             if (text) events.push({ ts: tsFormatted, type: 'message', text })
           } else if (msg.role === 'assistant') {
+            const modelError = detectModelError(msg)
+            if (modelError) {
+              modelWarnings.push(modelError)
+              events.push({
+                ts: tsFormatted,
+                type: 'error',
+                category: modelError.type,
+                text: modelError.summary,
+                detail: modelError.detail,
+              })
+            }
             const c = msg.content
             if (Array.isArray(c)) {
               for (const item of c) {
@@ -325,6 +461,7 @@ router.get('/events', async (_req, res) => {
                   events.push({ ts: tsFormatted, type: 'thinking', text: (item.thinking || '') })
                 } else if (item.type === 'tool_use' || item.type === 'toolCall') {
                   const toolName = item.name || ''
+                  if (toolName) toolChain.push(toolName)
                   const toolText = toolName + (item.input ? ': ' + JSON.stringify(item.input, null, 2) : '')
                   events.push({ ts: tsFormatted, type: 'tool', text: toolText, toolName })
                 } else if (item.type === 'text' && item.text) {
@@ -332,6 +469,17 @@ router.get('/events', async (_req, res) => {
                   if (lower.includes('bash') || lower.includes('exec')) {
                     events.push({ ts: tsFormatted, type: 'tool', text: item.text })
                   } else {
+                    const quality = detectReplyQualityWarnings(item.text)
+                    for (const warning of quality) {
+                      replyQualityWarnings.push(warning)
+                      events.push({
+                        ts: tsFormatted,
+                        type: 'warning',
+                        category: warning.type,
+                        issue: warning.issue,
+                        text: warning.summary,
+                      })
+                    }
                     const ev = { ts: tsFormatted, type: 'reply', text: item.text }
                     if (lastUserTsMs && msgTs) {
                       const diff = (new Date(msgTs).getTime() - lastUserTsMs) / 1000
@@ -350,6 +498,17 @@ router.get('/events', async (_req, res) => {
                 }
               }
             } else if (typeof c === 'string') {
+              const quality = detectReplyQualityWarnings(c)
+              for (const warning of quality) {
+                replyQualityWarnings.push(warning)
+                events.push({
+                  ts: tsFormatted,
+                  type: 'warning',
+                  category: warning.type,
+                  issue: warning.issue,
+                  text: warning.summary,
+                })
+              }
               const ev = { ts: tsFormatted, type: 'reply', text: c }
               if (lastUserTsMs && msgTs) {
                 const diff = (new Date(msgTs).getTime() - lastUserTsMs) / 1000
@@ -415,7 +574,8 @@ router.get('/events', async (_req, res) => {
           cost: Math.round(sessionCost * 100000) / 100000,
           inputTokens: sessionInputTokens,
           outputTokens: sessionOutputTokens,
-          warnings: toolWarnings,
+          warnings: [...modelWarnings, ...replyQualityWarnings, ...toolWarnings],
+          toolChain,
           events
         }
         channels[channel].push(sessionEntry)
@@ -760,6 +920,9 @@ module.exports = {
   router,
   agentSessionsRouter,
   _internal: {
+    detectModelError,
+    detectReplyQualityWarnings,
+    extractMessageText,
     isDeliveryMirrorMessage,
     normalizeSessionEntry,
     shouldIncludeMonitorMessage,

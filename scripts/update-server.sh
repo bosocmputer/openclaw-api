@@ -3,6 +3,7 @@
 #
 # Usage:
 #   bash scripts/update-server.sh --dry-run
+#   bash scripts/update-server.sh --apply --artifact /path/to/artifact
 #   bash scripts/update-server.sh --apply --mcp-url http://192.168.2.248:3515/sse --openrouter-key "$KEY"
 #   bash scripts/update-server.sh --rollback <backup-id>
 #   bash scripts/update-server.sh --health-only
@@ -21,14 +22,19 @@ STATE_DIR="${STATE_DIR:-$HOME/.openclaw}"
 CONFIG_PATH="$STATE_DIR/openclaw.json"
 API_URL="${API_URL:-http://127.0.0.1:4000}"
 PM2_PROCESS="${PM2_PROCESS:-openclaw-api}"
+RUNTIME_DIST_DIR="${RUNTIME_DIST_DIR:-/usr/lib/node_modules/openclaw/dist}"
+DEPLOY_METADATA="$STATE_DIR/deploy-metadata.json"
 DEFAULT_MCP_URL="http://192.168.2.248:3515/sse"
 
 MODE="dry-run"
 MCP_URL="$DEFAULT_MCP_URL"
+ARTIFACT_PATH=""
 OPENROUTER_KEY="${OPENROUTER_KEY:-}"
 ROLLBACK_ID=""
 BACKUP_ID="$(date +%Y%m%d%H%M%S)"
 BACKUP_ROOT="$STATE_DIR/backups/openclaw-update-$BACKUP_ID"
+ARTIFACT_RESOLVED_DIR=""
+CHANGED_RUNTIME=0
 CHANGED_API=0
 CHANGED_ADMIN=0
 CHANGED_STATE=0
@@ -48,6 +54,7 @@ while [[ $# -gt 0 ]]; do
     --apply) MODE="apply"; shift ;;
     --health-only) MODE="health-only"; shift ;;
     --rollback) MODE="rollback"; ROLLBACK_ID="${2:-}"; shift 2 ;;
+    --artifact) ARTIFACT_PATH="${2:-}"; shift 2 ;;
     --mcp-url) MCP_URL="${2:-}"; shift 2 ;;
     --openrouter-key) OPENROUTER_KEY="${2:-}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
@@ -79,7 +86,27 @@ find_pm2() {
       return 0
     fi
   done
+  for candidate in "$HOME/.npm-global/lib/node_modules/pm2/bin/pm2" /usr/local/lib/node_modules/pm2/bin/pm2; do
+    if [[ -x "$candidate" ]]; then
+      echo "$candidate"
+      return 0
+    fi
+  done
   return 1
+}
+
+sudo_available() {
+  sudo -n true >/dev/null 2>&1 || [[ -n "${SUDO_PASSWORD:-}" ]]
+}
+
+run_sudo() {
+  if sudo -n true >/dev/null 2>&1; then
+    sudo "$@"
+  elif [[ -n "${SUDO_PASSWORD:-}" ]]; then
+    printf '%s\n' "$SUDO_PASSWORD" | sudo -S "$@"
+  else
+    return 1
+  fi
 }
 
 load_api_token() {
@@ -134,6 +161,16 @@ preflight() {
   command -v git >/dev/null || { err "git not found"; exit 1; }
   command -v node >/dev/null || { err "node not found"; exit 1; }
   command -v curl >/dev/null || { err "curl not found"; exit 1; }
+  [[ -z "$ARTIFACT_PATH" || -e "$ARTIFACT_PATH" ]] || { err "Artifact not found: $ARTIFACT_PATH"; exit 1; }
+  if [[ -n "$ARTIFACT_PATH" ]]; then
+    command -v rsync >/dev/null || { err "rsync not found"; exit 1; }
+    [[ ! -f "$ARTIFACT_PATH" ]] || command -v tar >/dev/null || { err "tar not found"; exit 1; }
+    if [[ -d "$RUNTIME_DIST_DIR" && ! -w "$RUNTIME_DIST_DIR" ]]; then
+      sudo_available \
+        && ok "sudo available for runtime dist writes" \
+        || warn "Runtime dist is not writable and sudo is unavailable; artifact runtime deploy will stop if openclaw-dist is included"
+    fi
+  fi
   find_pm2 >/dev/null || warn "pm2 not found"
   command -v docker >/dev/null || warn "docker not found in PATH"
   load_api_token
@@ -148,10 +185,15 @@ preflight() {
 
 backup_state() {
   log "Creating backup $BACKUP_ID"
-  run mkdir -p "$BACKUP_ROOT/files"
+  run mkdir -p "$BACKUP_ROOT/files" "$BACKUP_ROOT/runtime-dist"
   if [[ "$MODE" == "dry-run" ]]; then return 0; fi
 
   cp "$CONFIG_PATH" "$BACKUP_ROOT/openclaw.json"
+  [[ -f "$DEPLOY_METADATA" ]] && cp "$DEPLOY_METADATA" "$BACKUP_ROOT/deploy-metadata.json" || true
+  if [[ -d "$RUNTIME_DIST_DIR" ]]; then
+    find "$RUNTIME_DIST_DIR" -maxdepth 1 -type f \( -name '*.js' -o -name '*.map' -o -name '*.json' \) -print0 \
+      | xargs -0 -r cp -t "$BACKUP_ROOT/runtime-dist"
+  fi
   git -C "$API_DIR" rev-parse HEAD > "$BACKUP_ROOT/openclaw-api.head"
   git -C "$ADMIN_DIR" rev-parse HEAD > "$BACKUP_ROOT/openclaw-admin.head"
   git -C "$API_DIR" status --porcelain > "$BACKUP_ROOT/openclaw-api.status" || true
@@ -174,6 +216,11 @@ restore_backup() {
   log "Restoring backup $id"
   cp "$CONFIG_PATH" "$CONFIG_PATH.before-rollback.$(date +%Y%m%d%H%M%S)" 2>/dev/null || true
   cp "$root/openclaw.json" "$CONFIG_PATH"
+  if [[ -f "$root/deploy-metadata.json" ]]; then cp "$root/deploy-metadata.json" "$DEPLOY_METADATA"; fi
+  if [[ -d "$root/runtime-dist" && -d "$RUNTIME_DIST_DIR" ]]; then
+    copy_runtime_glob_from_dir "$root/runtime-dist"
+    CHANGED_RUNTIME=1
+  fi
   if [[ -d "$root/files" ]]; then
     (cd "$root/files" && find . -type f) | while read -r rel; do
       rel="${rel#./}"
@@ -195,6 +242,121 @@ restore_backup() {
   fi
   ok "Rollback files restored"
   restart_changed "rollback"
+}
+
+checksum_file() {
+  local file="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$file" | awk '{print $1}'
+  else
+    shasum -a 256 "$file" | awk '{print $1}'
+  fi
+}
+
+copy_runtime_file() {
+  local src="$1"
+  local dest="$RUNTIME_DIST_DIR/$(basename "$src")"
+  if [[ -w "$RUNTIME_DIST_DIR" ]]; then
+    cp "$src" "$dest"
+  elif sudo_available; then
+    run_sudo cp "$src" "$dest"
+    run_sudo chmod 0644 "$dest" || true
+  else
+    err "Cannot write runtime dist: $RUNTIME_DIST_DIR. Re-run with passwordless sudo, set SUDO_PASSWORD, or deploy runtime manually."
+    exit 1
+  fi
+}
+
+copy_runtime_glob_from_dir() {
+  local src_dir="$1"
+  find "$src_dir" -maxdepth 1 -type f -print0 | while IFS= read -r -d '' file; do
+    copy_runtime_file "$file"
+  done
+}
+
+write_deploy_metadata() {
+  if [[ "$MODE" == "dry-run" ]]; then
+    echo "DRY-RUN: write deploy metadata to $DEPLOY_METADATA"
+    return 0
+  fi
+  node - "$DEPLOY_METADATA" "$BACKUP_ID" "$ARTIFACT_PATH" "$ARTIFACT_RESOLVED_DIR" "$CONFIG_PATH" "$RUNTIME_DIST_DIR" <<'NODE'
+const fs = require('fs')
+const path = require('path')
+const crypto = require('crypto')
+const [metadataPath, backupId, artifactPath, artifactResolvedDir, configPath, distDir] = process.argv.slice(2)
+function sha(file) {
+  try { return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex') } catch { return null }
+}
+function readArtifactManifest() {
+  const candidates = []
+  if (artifactResolvedDir) candidates.push(path.join(artifactResolvedDir, 'release-manifest.json'))
+  if (artifactPath) {
+    try {
+      if (fs.existsSync(artifactPath) && fs.statSync(artifactPath).isDirectory()) {
+        candidates.push(path.join(artifactPath, 'release-manifest.json'))
+      }
+    } catch {}
+  }
+  for (const file of candidates) {
+    try { return JSON.parse(fs.readFileSync(file, 'utf8')) } catch {}
+  }
+  return null
+}
+const distFiles = {}
+for (const name of ['bot-r6hl6ztC.js', 'openclaw-tools-ChLzmhJi.js']) {
+  const file = `${distDir}/${name}`
+  const hash = sha(file)
+  if (hash) distFiles[name] = { sha256: hash }
+}
+const metadata = {
+  generatedAt: new Date().toISOString(),
+  backupId,
+  artifactPath: artifactPath || null,
+  artifact: readArtifactManifest(),
+  config: { sha256: sha(configPath) },
+  distFiles,
+}
+fs.mkdirSync(require('path').dirname(metadataPath), { recursive: true })
+fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2), { mode: 0o600 })
+NODE
+  ok "Deploy metadata written: $DEPLOY_METADATA"
+}
+
+deploy_artifact() {
+  [[ -n "$ARTIFACT_PATH" ]] || return 0
+  log "Applying artifact $ARTIFACT_PATH"
+  if [[ "$MODE" == "dry-run" ]]; then
+    echo "DRY-RUN: copy artifact runtime/API/Admin files and run remote syntax checks"
+    return 0
+  fi
+
+  local artifact_dir="$ARTIFACT_PATH"
+  local tmp_dir=""
+  if [[ -f "$ARTIFACT_PATH" ]]; then
+    tmp_dir="$STATE_DIR/tmp-artifact-$BACKUP_ID"
+    rm -rf "$tmp_dir"
+    mkdir -p "$tmp_dir"
+    tar -xf "$ARTIFACT_PATH" -C "$tmp_dir"
+    artifact_dir="$tmp_dir"
+  fi
+  ARTIFACT_RESOLVED_DIR="$artifact_dir"
+
+  if [[ -d "$artifact_dir/openclaw-dist" ]]; then
+    copy_runtime_glob_from_dir "$artifact_dir/openclaw-dist"
+    find "$artifact_dir/openclaw-dist" -maxdepth 1 -name '*.js' -print0 | while IFS= read -r -d '' file; do
+      node --check "$RUNTIME_DIST_DIR/$(basename "$file")"
+    done
+    CHANGED_RUNTIME=1
+  fi
+  if [[ -d "$artifact_dir/openclaw-api" ]]; then
+    rsync -a --exclude node_modules --exclude .git "$artifact_dir/openclaw-api"/ "$API_DIR"/
+    find "$API_DIR/routes" "$API_DIR/lib" -maxdepth 2 -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check
+    CHANGED_API=1
+  fi
+  if [[ -d "$artifact_dir/openclaw-admin" ]]; then
+    rsync -a --exclude node_modules --exclude .git --exclude .next "$artifact_dir/openclaw-admin"/ "$ADMIN_DIR"/
+    CHANGED_ADMIN=1
+  fi
 }
 
 update_repo() {
@@ -338,15 +500,15 @@ fix_telegram_hosts() {
     echo "DRY-RUN: sudo update /etc/hosts for api.telegram.org -> 149.154.166.110"
     return 0
   fi
-  if ! sudo -n true 2>/dev/null; then
+  if ! sudo_available; then
     warn "sudo without password is not available; run manually:"
     echo "  sudo sed -i '/api\\.telegram\\.org/d' /etc/hosts"
     echo "  echo '149.154.166.110 api.telegram.org api4.telegram.org' | sudo tee -a /etc/hosts"
     return 0
   fi
-  sudo sed -i '/api\.telegram\.org/d' /etc/hosts 2>/dev/null || true
-  sudo sed -i '/api4\.telegram\.org/d' /etc/hosts 2>/dev/null || true
-  echo '149.154.166.110 api.telegram.org api4.telegram.org' | sudo tee -a /etc/hosts >/dev/null
+  run_sudo sed -i '/api\.telegram\.org/d' /etc/hosts 2>/dev/null || true
+  run_sudo sed -i '/api4\.telegram\.org/d' /etc/hosts 2>/dev/null || true
+  echo '149.154.166.110 api.telegram.org api4.telegram.org' | run_sudo tee -a /etc/hosts >/dev/null
   ok "Telegram hosts pin updated"
 }
 
@@ -364,7 +526,7 @@ restart_changed() {
   local reason="${1:-apply}"
   if [[ "$MODE" == "dry-run" ]]; then
     echo "DRY-RUN: restart $PM2_PROCESS only if code/state changed"
-    echo "DRY-RUN: restart openclaw gateway if state changed"
+    echo "DRY-RUN: restart openclaw gateway if runtime/API/state changed"
     return 0
   fi
   load_api_token
@@ -381,7 +543,11 @@ restart_changed() {
   else
     ok "API restart skipped; no API/state change"
   fi
-  if [[ -n "${API_TOKEN:-}" && ( "$CHANGED_STATE" -eq 1 || "$CHANGED_API" -eq 1 || "$reason" == "rollback" ) ]]; then
+  if [[ "$CHANGED_RUNTIME" -eq 1 ]]; then
+    systemctl --user restart openclaw-gateway.service \
+      && ok "Gateway service restarted" \
+      || warn "systemctl gateway restart failed"
+  elif [[ -n "${API_TOKEN:-}" && ( "$CHANGED_STATE" -eq 1 || "$CHANGED_API" -eq 1 || "$reason" == "rollback" ) ]]; then
     curl -fsS -X POST "$API_URL/api/gateway/restart" -H "Authorization: Bearer $API_TOKEN" >/dev/null \
       && ok "Gateway restarted" \
       || warn "Gateway restart request failed"
@@ -391,13 +557,19 @@ restart_changed() {
 main_apply() {
   preflight
   backup_state
-  update_repo "$API_DIR" "openclaw-api"
-  update_repo "$ADMIN_DIR" "openclaw-admin"
+  deploy_artifact
+  if [[ -z "$ARTIFACT_PATH" ]]; then
+    update_repo "$API_DIR" "openclaw-api"
+    update_repo "$ADMIN_DIR" "openclaw-admin"
+  else
+    ok "Git pull skipped; artifact is the deploy source for this run"
+  fi
   configure_mcp
   rotate_openrouter_key
   fix_telegram_hosts
   build_admin_if_needed
   restart_changed "apply"
+  write_deploy_metadata
   log "Post-check health"
   if health_check; then
     ok "Health check passed"
@@ -414,8 +586,13 @@ case "$MODE" in
   dry-run)
     preflight
     backup_state
-    update_repo "$API_DIR" "openclaw-api"
-    update_repo "$ADMIN_DIR" "openclaw-admin"
+    deploy_artifact
+    if [[ -z "$ARTIFACT_PATH" ]]; then
+      update_repo "$API_DIR" "openclaw-api"
+      update_repo "$ADMIN_DIR" "openclaw-admin"
+    else
+      ok "Git pull skipped; artifact is the deploy source for this run"
+    fi
     configure_mcp
     rotate_openrouter_key
     fix_telegram_hosts

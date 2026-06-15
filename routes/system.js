@@ -2,9 +2,11 @@ const router = require('express').Router()
 const fs = require('fs')
 const path = require('path')
 const net = require('net')
+const crypto = require('crypto')
 const { execFileSync } = require('child_process')
 const { HOME, CONFIG_PATH } = require('../lib/config')
 const { readOpenclawConfig } = require('../lib/openclaw-config')
+const { buildLatencyFromGatewayLog } = require('../lib/monitor-latency')
 const {
   DEFAULT_MCP_URL,
   compareSoulContractToTools,
@@ -81,6 +83,80 @@ function readTailLines(filePath, maxLines, maxBytes = 256 * 1024) {
   }
 }
 
+function sha256File(filePath) {
+  try {
+    return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex')
+  } catch {
+    return null
+  }
+}
+
+function releaseState() {
+  const distDir = '/usr/lib/node_modules/openclaw/dist'
+  const distFiles = [
+    'bot-r6hl6ztC.js',
+    'openclaw-tools-ChLzmhJi.js',
+  ].map(name => {
+    const filePath = path.join(distDir, name)
+    try {
+      const stat = fs.statSync(filePath)
+      return { name, path: filePath, size: stat.size, mtime: stat.mtime.toISOString(), sha256: sha256File(filePath) }
+    } catch {
+      return { name, path: filePath, missing: true }
+    }
+  })
+  return {
+    generatedAt: nowIso(),
+    metadataPath: path.join(HOME, '.openclaw/deploy-metadata.json'),
+    config: {
+      path: CONFIG_PATH,
+      sha256: sha256File(CONFIG_PATH),
+    },
+    distFiles,
+    apiUpdateScript: {
+      path: path.join(HOME, 'openclaw-api/scripts/update-server.sh'),
+      sha256: sha256File(path.join(HOME, 'openclaw-api/scripts/update-server.sh')),
+    },
+  }
+}
+
+function releaseMetadataStatus() {
+  const startedAt = Date.now()
+  const state = releaseState()
+  try {
+    const metadata = readJsonFile(state.metadataPath)
+    const expected = metadata?.distFiles || {}
+    const mismatches = []
+    for (const file of state.distFiles) {
+      if (file.missing) {
+        mismatches.push(`${file.name}: missing`)
+        continue
+      }
+      const expectedHash = expected[file.name]?.sha256 || expected[file.name]
+      if (expectedHash && expectedHash !== file.sha256) mismatches.push(`${file.name}: checksum mismatch`)
+    }
+    return makeCheck(
+      'release.metadata',
+      'Release metadata',
+      mismatches.length ? 'warn' : 'ok',
+      'warn',
+      mismatches.length ? mismatches.join('; ') : `Deployed artifact metadata present (${metadata.backupId || metadata.generatedAt || 'unknown build'})`,
+      startedAt,
+      { remediation: mismatches.length ? 'Redeploy from source artifact or rollback to the last matching backup id' : undefined }
+    )
+  } catch {
+    return makeCheck(
+      'release.metadata',
+      'Release metadata',
+      'warn',
+      'warn',
+      'No deploy metadata found for runtime dist checksums',
+      startedAt,
+      { remediation: 'Run update-server.sh --apply so deployed dist files get source/build trace metadata' }
+    )
+  }
+}
+
 function resolveHome(p) {
   return typeof p === 'string' ? p.replace(/^~/, HOME) : p
 }
@@ -141,6 +217,28 @@ function hasAuthProfile(agentId) {
   }
 }
 
+function resolveAgentModelFallbacks(config, agent) {
+  const agentFallbacks = agent?.model?.fallbacks
+  if (Array.isArray(agentFallbacks)) return agentFallbacks.filter(Boolean)
+  const defaultFallbacks = config?.agents?.defaults?.model?.fallbacks
+  if (Array.isArray(defaultFallbacks)) return defaultFallbacks.filter(Boolean)
+  return []
+}
+
+function agentUsesImageTool(agent) {
+  const allow = agent?.tools?.allow
+  return Array.isArray(allow) && allow.includes('image')
+}
+
+function hasImageModelConfig(config, agent) {
+  return Boolean(
+    agent?.imageModel ||
+    agent?.model?.imageModel ||
+    config?.agents?.defaults?.imageModel ||
+    config?.agents?.defaults?.mediaUnderstandingModel
+  )
+}
+
 function soulStatus(agent, tools = []) {
   const workspace = resolveHome(agent.workspace)
   const soulPath = path.join(workspace, 'SOUL.md')
@@ -154,16 +252,30 @@ function soulStatus(agent, tools = []) {
     ].filter(p => p.re.test(soul)).map(p => p.label)
     const contract = parseSoulContract(soul)
     const contractStatus = compareSoulContractToTools(contract, tools)
-    const warnings = [...legacyPatterns.map(p => `legacy pattern: ${p}`), ...contractStatus.warnings]
+    const toolNames = new Set((tools || []).map(t => t.name))
+    const isStockSoul = contract?.accessMode === 'stock' || /MCP_ACCESS_MODE=stock\b/.test(soul)
+    const stockFlowMissing = isStockSoul &&
+      toolNames.has('search_product') &&
+      toolNames.has('get_stock_balance') &&
+      !/workflowContract=stock-flow-v1\b/.test(soul)
+    const workflowWarnings = stockFlowMissing
+      ? ['SOUL missing stock-flow-v1 workflow contract']
+      : []
+    const warnings = [
+      ...legacyPatterns.map(p => `legacy pattern: ${p}`),
+      ...contractStatus.warnings,
+      ...workflowWarnings,
+    ]
     return {
       status: warnings.length ? 'warn' : 'ok',
       legacyPatterns,
       contract,
       contractWarnings: contractStatus.warnings,
+      workflowWarnings,
       summary: warnings.length ? warnings.join('; ') : 'SOUL contract matches MCP tools',
     }
   } catch {
-    return { status: 'fail', legacyPatterns: [], contractWarnings: [], summary: 'SOUL.md not found' }
+    return { status: 'fail', legacyPatterns: [], contractWarnings: [], workflowWarnings: [], summary: 'SOUL.md not found' }
   }
 }
 
@@ -251,6 +363,8 @@ async function buildHealth() {
   }
 
   const hooksPort = config.gateway?.hooksPort || 18789
+  checks.push(releaseMetadataStatus())
+
   const gatewayStart = Date.now()
   try {
     execFileSync('pgrep', ['-f', 'openclaw.*gateway|openclaw-gateway'], { timeout: 700, stdio: 'ignore' })
@@ -310,6 +424,7 @@ async function buildHealth() {
   await Promise.all(list.map(async (agent) => {
     const mcp = getAgentMcp(config, agent.id)
     const auth = hasAuthProfile(agent.id)
+    const modelFallbacks = resolveAgentModelFallbacks(config, agent)
     let toolCount = 0
     let mcpStatus = 'warn'
     let mcpSummary = 'No MCP server configured'
@@ -362,7 +477,42 @@ async function buildHealth() {
         remediation: soul.status === 'ok' ? undefined : 'Load the capability SOUL template, verify live MCP tools, then reset active sessions',
         legacyPatterns: soul.legacyPatterns,
         contractWarnings: soul.contractWarnings,
+        workflowWarnings: soul.workflowWarnings,
         allowedToolsHash: soul.contract?.allowedToolsHash,
+      }
+    ))
+
+    const fallbackStart = Date.now()
+    checks.push(makeCheck(
+      `model.fallback.${agent.id}`,
+      `Model fallback ${agent.id}`,
+      modelFallbacks.length ? 'ok' : 'warn',
+      'warn',
+      modelFallbacks.length
+        ? `${modelFallbacks.length} fallback model(s) configured`
+        : 'No fallback model configured; Telegram may surface model/provider timeouts',
+      fallbackStart,
+      { remediation: modelFallbacks.length ? undefined : 'Set agents.defaults.model.fallbacks or agent.model.fallbacks in openclaw.json' }
+    ))
+
+    const imageModelStart = Date.now()
+    const usesImageTool = agentUsesImageTool(agent)
+    const imageModelConfigured = hasImageModelConfig(config, agent)
+    checks.push(makeCheck(
+      `model.image.${agent.id}`,
+      `Image model ${agent.id}`,
+      !usesImageTool || imageModelConfigured ? 'ok' : 'warn',
+      'warn',
+      !usesImageTool
+        ? 'Agent does not use image tool'
+        : imageModelConfigured
+          ? 'Image model explicitly configured'
+          : 'Image tool uses auto model resolution; invalid model overrides may add latency',
+      imageModelStart,
+      {
+        remediation: usesImageTool && !imageModelConfigured
+          ? 'Set agents.defaults.imageModel to a known available vision model for predictable image latency'
+          : undefined,
       }
     ))
 
@@ -385,6 +535,7 @@ async function buildHealth() {
       toolSource,
       soulStatus: soul.status,
       authStatus: auth.ok ? 'ok' : 'warn',
+      fallbackModelCount: modelFallbacks.length,
     })
   }))
 
@@ -411,6 +562,33 @@ async function buildHealth() {
       `${okCount}/${results.length} bot account(s) reachable`,
       tgStart,
       { remediation: failCount ? 'Check bot tokens and the api.telegram.org hosts pin' : undefined }
+    ))
+  }
+
+  const telemetryStart = Date.now()
+  try {
+    const latency = buildLatencyFromGatewayLog({ minutes: 30, maxLines: 1500, maxBytes: 1024 * 1024 })
+    const hasRecentMarkers = latency.summary.count > 0
+    checks.push(makeCheck(
+      'telemetry.telegram',
+      'Telegram telemetry',
+      hasRecentMarkers ? 'ok' : 'warn',
+      'warn',
+      hasRecentMarkers
+        ? `${latency.summary.count} Telegram turn marker(s) found in the last 30 minutes`
+        : 'No Telegram latency markers found in the recent gateway log window',
+      telemetryStart,
+      { remediation: hasRecentMarkers ? undefined : 'Send a Telegram test message after restart and verify gateway log markers' }
+    ))
+  } catch (e) {
+    checks.push(makeCheck(
+      'telemetry.telegram',
+      'Telegram telemetry',
+      'warn',
+      'warn',
+      sanitizeError(e),
+      telemetryStart,
+      { remediation: 'Check /tmp/openclaw gateway logs and runtime telemetry markers' }
     ))
   }
 
@@ -489,11 +667,16 @@ router.get('/support-bundle', async (req, res) => {
       }))
     } catch {}
 
+    const latency = buildLatencyFromGatewayLog({ minutes: 60, maxLines: 2500, maxBytes: 1024 * 1024 })
+
     res.json(redact({
       generatedAt: nowIso(),
       durationMs: durationSince(startedAt),
       health,
+      releaseState: releaseState(),
       recentToolLoopWarnings: recentToolLoopWarnings(readOpenclawConfig()),
+      latencySummary: latency.summary,
+      recentSlowTurns: latency.slowest.slice(0, 10),
       repos,
       processStatus,
       runtime: {

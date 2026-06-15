@@ -20,6 +20,15 @@ test('fallback tool snapshots expose price only for modes that have it', () => {
   assert.equal(sales.some(t => t.name === 'get_product_price'), true)
 })
 
+test('fallback tool snapshots exclude generic fallback and write tools by default', () => {
+  for (const mode of ['admin', 'sales', 'purchase', 'stock', 'general']) {
+    const names = getFallbackTools(mode).map(t => t.name)
+
+    assert.equal(names.includes('fallback_response'), false, mode)
+    assert.equal(names.includes('create_sale_reserve'), false, mode)
+  }
+})
+
 test('legacy sale agent ids normalize to sales access mode', () => {
   assert.equal(normalizeAccessMode('sale'), 'sales')
   assert.equal(normalizeAccessMode('sale_goh'), 'sales')

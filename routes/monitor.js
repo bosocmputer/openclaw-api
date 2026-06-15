@@ -43,6 +43,42 @@ function latestFiles(dir, predicate, limit) {
     .map(f => f.name)
 }
 
+function isDeliveryMirrorMessage(msg) {
+  return msg?.role === 'assistant' && String(msg.model || '').toLowerCase() === 'delivery-mirror'
+}
+
+function normalizeSessionEntry(entry) {
+  if (!entry) return null
+  if (entry.message && entry.message.role) {
+    // wrapped format: {type, id, timestamp, message:{role,content,usage}}
+    return {
+      role: entry.message.role,
+      content: entry.message.content,
+      timestamp: entry.timestamp,
+      usage: entry.message.usage ?? entry.usage,
+      api: entry.message.api,
+      provider: entry.message.provider,
+      model: entry.message.model,
+      stopReason: entry.message.stopReason,
+    }
+  }
+  // flat format: {role, content, timestamp}
+  return entry
+}
+
+function shouldIncludeMonitorMessage(msg) {
+  if (!msg) return false
+  if (isDeliveryMirrorMessage(msg)) return false
+
+  const content = msg.content
+  if (Array.isArray(content)) {
+    return !content.some(c => typeof c === 'object' && c.type === 'tool_result' &&
+      Array.isArray(c.content) && c.content.some(x => typeof x.text === 'string' && x.text.includes('HEARTBEAT_OK')))
+  }
+  if (typeof content === 'string' && content.includes('HEARTBEAT_OK')) return false
+  return true
+}
+
 // GET /api/monitor/events — real-time session state across all agents and channels
 router.get('/events', async (_req, res) => {
   try {
@@ -133,27 +169,10 @@ router.get('/events', async (_req, res) => {
         }
 
         // Normalize: jsonl entries may be {role,content,timestamp} or {type,timestamp,message:{role,content}}
-        const normalized = parsedLines.map(entry => {
-          if (!entry) return null
-          if (entry.message && entry.message.role) {
-            // wrapped format: {type, id, timestamp, message:{role,content,usage}}
-            return { role: entry.message.role, content: entry.message.content, timestamp: entry.timestamp, usage: entry.message.usage ?? entry.usage, model: entry.message.model, stopReason: entry.message.stopReason }
-          }
-          // flat format: {role, content, timestamp}
-          return entry
-        }).filter(Boolean)
+        const normalized = parsedLines.map(normalizeSessionEntry).filter(Boolean)
 
-        // Filter out HEARTBEAT_OK messages
-        const filtered = normalized.filter(msg => {
-          if (!msg) return false
-          const content = msg.content
-          if (Array.isArray(content)) {
-            return !content.some(c => typeof c === 'object' && c.type === 'tool_result' &&
-              Array.isArray(c.content) && c.content.some(x => typeof x.text === 'string' && x.text.includes('HEARTBEAT_OK')))
-          }
-          if (typeof content === 'string' && content.includes('HEARTBEAT_OK')) return false
-          return true
-        })
+        // Filter out heartbeat noise and delivery receipts mirrored after Telegram sends.
+        const filtered = normalized.filter(shouldIncludeMonitorMessage)
 
         let lastUserMsg = null
         let lastAssistantMsg = null
@@ -438,6 +457,7 @@ agentSessionsRouter.get('/:id/sessions', (req, res) => {
         for (const line of lines) {
           try {
             const entry = JSON.parse(line)
+            if (isDeliveryMirrorMessage(entry.message)) continue
             const usage = entry.message?.usage ?? entry.usage
             if (usage) {
               inputTokens += usage.input || usage.input_tokens || 0
@@ -516,6 +536,7 @@ agentSessionsRouter.get('/:id/sessions/:sessionKey(*)', (req, res) => {
         const entry = JSON.parse(line)
         if (entry.type !== 'message' || !entry.message) continue
         const msg = entry.message
+        if (isDeliveryMirrorMessage(msg)) continue
         const usage = msg.usage ?? entry.usage
         const ts = entry.timestamp
 
@@ -626,6 +647,7 @@ router.get('/cost', (req, res) => {
             try {
               const entry = JSON.parse(line)
               if (entry.message?.role !== 'assistant') continue
+              if (isDeliveryMirrorMessage(entry.message)) continue
               const usage = entry.message?.usage ?? entry.usage
               if (!usage) continue
               const ts = entry.timestamp
@@ -680,6 +702,12 @@ router.get('/cost', (req, res) => {
   }
 })
 
-module.exports = router
-
-module.exports = { router, agentSessionsRouter }
+module.exports = {
+  router,
+  agentSessionsRouter,
+  _internal: {
+    isDeliveryMirrorMessage,
+    normalizeSessionEntry,
+    shouldIncludeMonitorMessage,
+  },
+}

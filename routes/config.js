@@ -1,12 +1,10 @@
 const router = require('express').Router()
-const fs = require('fs')
-const { CONFIG_PATH } = require('../lib/config')
+const { readOpenclawConfig, writeOpenclawConfigAtomic } = require('../lib/openclaw-config')
 
 // GET /api/config — อ่าน openclaw.json ทั้งหมด
 router.get('/', (req, res) => {
   try {
-    const raw = fs.readFileSync(CONFIG_PATH, 'utf8')
-    res.json(JSON.parse(raw))
+    res.json(readOpenclawConfig())
   } catch (e) {
     console.error('[openclaw-api]', req.method, req.path, e.message)
     res.status(500).json({ error: 'Internal server error' })
@@ -21,11 +19,7 @@ router.put('/', (req, res) => {
     // ต้องมี gateway key เป็น object
     if (req.body.gateway !== undefined && (typeof req.body.gateway !== 'object' || Array.isArray(req.body.gateway)))
       return res.status(400).json({ error: 'Invalid config: gateway must be an object' })
-    const serialized = JSON.stringify(req.body, null, 2)
-    // เขียน temp file ก่อน แล้ว rename เพื่อป้องกัน partial write
-    const tmpPath = CONFIG_PATH + '.tmp'
-    fs.writeFileSync(tmpPath, serialized)
-    fs.renameSync(tmpPath, CONFIG_PATH)
+    writeOpenclawConfigAtomic(req.body, { reason: 'config-put' })
     res.json({ ok: true })
   } catch (e) {
     console.error('[openclaw-api]', req.method, req.path, e.message)

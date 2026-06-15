@@ -41,6 +41,7 @@ app.use((req, res, next) => {
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
 app.use('/api/status',    require('./routes/status'))
+app.use('/api/system',    require('./routes/system'))
 app.use('/api/config',    require('./routes/config'))
 app.use('/api/auth',      require('./routes/auth'))
 app.use('/api/agents',    require('./routes/agents'))

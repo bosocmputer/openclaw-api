@@ -2,17 +2,53 @@ const router = require('express').Router()
 const agentSessionsRouter = require('express').Router()
 const fs = require('fs')
 const path = require('path')
-const { HOME, CONFIG_PATH } = require('../lib/config')
+const { HOME } = require('../lib/config')
 const { readUserNames } = require('../lib/files')
 const { pgPool } = require('../lib/pg')
 const { stripGatewayMetadata } = require('./webchat')
+const { readOpenclawConfig } = require('../lib/openclaw-config')
+
+const MAX_TAIL_BYTES = 1024 * 1024
+const MAX_EVENTS_LINES = 80
+const MAX_SESSION_LINES = 1200
+const MAX_COST_LINES_PER_FILE = 2500
+const MAX_COST_FILES_PER_AGENT = 200
+const MAX_SESSIONS_PER_AGENT = 300
+
+function readTailLines(filePath, maxLines, maxBytes = MAX_TAIL_BYTES) {
+  const stat = fs.statSync(filePath)
+  const start = Math.max(0, stat.size - maxBytes)
+  const fd = fs.openSync(filePath, 'r')
+  try {
+    const buffer = Buffer.alloc(stat.size - start)
+    fs.readSync(fd, buffer, 0, buffer.length, start)
+    return buffer.toString('utf8').split('\n').filter(l => l.trim()).slice(-maxLines)
+  } finally {
+    fs.closeSync(fd)
+  }
+}
+
+function latestFiles(dir, predicate, limit) {
+  return fs.readdirSync(dir)
+    .filter(predicate)
+    .map(name => {
+      try {
+        const fullPath = path.join(dir, name)
+        return { name, mtime: fs.statSync(fullPath).mtimeMs }
+      } catch { return null }
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.mtime - a.mtime)
+    .slice(0, limit)
+    .map(f => f.name)
+}
 
 // GET /api/monitor/events — real-time session state across all agents and channels
 router.get('/events', async (_req, res) => {
   try {
     // Read agents from openclaw.json
     let config = {}
-    try { config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) } catch { config = {} }
+    try { config = readOpenclawConfig() } catch { config = {} }
     const agentList = (config.agents && config.agents.list) ? config.agents.list : []
 
     // Load existing webchat rooms from DB grouped by agent_id
@@ -48,7 +84,7 @@ router.get('/events', async (_req, res) => {
 
       const channels = {}
 
-      for (const [key, sessionInfo] of Object.entries(sessionsMap)) {
+      for (const [key, sessionInfo] of Object.entries(sessionsMap).slice(-MAX_SESSIONS_PER_AGENT)) {
         // Skip heartbeat sessions
         if (key.includes(':main')) continue
 
@@ -84,12 +120,10 @@ router.get('/events', async (_req, res) => {
         if (!sessionFile) continue
         if (!channels[channel]) channels[channel] = []
 
-        // Read last 50 lines of the .jsonl file
+        // Read a bounded tail window of the .jsonl file.
         let lines = []
         try {
-          const content = fs.readFileSync(sessionFile, 'utf8')
-          const allLines = content.split('\n').filter(l => l.trim())
-          lines = allLines.slice(-50)
+          lines = readTailLines(sessionFile, MAX_EVENTS_LINES)
         } catch { continue }
 
         // Parse JSONL events
@@ -342,8 +376,7 @@ router.get('/events', async (_req, res) => {
 
       if (logFiles.length > 0) {
         const latestLog = path.join(logDir, logFiles[0].name)
-        const logContent = fs.readFileSync(latestLog, 'utf8')
-        const logLines = logContent.split('\n').filter(l => l.trim()).slice(-100)
+        const logLines = readTailLines(latestLog, 100, 512 * 1024)
         for (const line of logLines) {
           try {
             const obj = JSON.parse(line)
@@ -382,7 +415,7 @@ router.get('/events', async (_req, res) => {
 // GET /api/agents/:id/sessions — list sessions with token metadata
 agentSessionsRouter.get('/:id/sessions', (req, res) => {
   try {
-    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
+    const config = readOpenclawConfig()
     const agent = config.agents?.list?.find(a => a.id === req.params.id)
     if (!agent) return res.status(404).json({ error: 'Agent not found' })
 
@@ -393,7 +426,7 @@ agentSessionsRouter.get('/:id/sessions', (req, res) => {
     const userNames = readUserNames()
     const result = []
 
-    for (const [key, info] of Object.entries(sessionsMap)) {
+    for (const [key, info] of Object.entries(sessionsMap).slice(-MAX_SESSIONS_PER_AGENT)) {
       if (!info || !info.sessionId || key.includes(':main')) continue
       const sessionFile = info.sessionFile
         || path.join(HOME, `.openclaw/agents/${req.params.id}/sessions/${info.sessionId}.jsonl`)
@@ -401,7 +434,7 @@ agentSessionsRouter.get('/:id/sessions', (req, res) => {
 
       let inputTokens = 0, outputTokens = 0
       try {
-        const lines = fs.readFileSync(sessionFile, 'utf8').trim().split('\n').filter(Boolean)
+        const lines = readTailLines(sessionFile, MAX_SESSION_LINES)
         for (const line of lines) {
           try {
             const entry = JSON.parse(line)
@@ -468,7 +501,11 @@ agentSessionsRouter.get('/:id/sessions/:sessionKey(*)', (req, res) => {
     }
     if (!fs.existsSync(sessionFile)) return res.status(404).json({ error: 'Session not found' })
 
-    const lines = fs.readFileSync(sessionFile, 'utf8').trim().split('\n').filter(Boolean)
+    const requestedLimit = Number.parseInt(String(req.query.limit || ''), 10)
+    const limit = Number.isFinite(requestedLimit) && requestedLimit > 0
+      ? Math.min(requestedLimit, MAX_SESSION_LINES)
+      : MAX_SESSION_LINES
+    const lines = readTailLines(sessionFile, limit)
     const messages = []
     let totalInput = 0, totalOutput = 0, totalCost = 0
     let lastUserTsMs = null
@@ -563,9 +600,9 @@ agentSessionsRouter.get('/:id/sessions/:sessionKey(*)', (req, res) => {
 // GET /api/monitor/cost — aggregate cost per agent per day (last N days)
 router.get('/cost', (req, res) => {
   try {
-    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
+    const config = readOpenclawConfig()
     const agentList = config.agents?.list || []
-    const days = parseInt(req.query.days || '30')
+    const days = Math.min(Math.max(parseInt(req.query.days || '30'), 1), 90)
     const cutoff = new Date()
     cutoff.setDate(cutoff.getDate() - days)
 
@@ -576,13 +613,15 @@ router.get('/cost', (req, res) => {
       const sessionsDir = path.join(HOME, `.openclaw/agents/${agent.id}/sessions`)
       if (!fs.existsSync(sessionsDir)) continue
 
-      const files = fs.readdirSync(sessionsDir)
-        .filter(f => f.endsWith('.jsonl') && !f.includes('.reset.'))
+      const files = latestFiles(
+        sessionsDir,
+        f => f.endsWith('.jsonl') && !f.includes('.reset.'),
+        MAX_COST_FILES_PER_AGENT
+      )
 
       for (const file of files) {
         try {
-          const content = fs.readFileSync(path.join(sessionsDir, file), 'utf8')
-          const lines = content.trim().split('\n').filter(Boolean)
+          const lines = readTailLines(path.join(sessionsDir, file), MAX_COST_LINES_PER_FILE, 2 * 1024 * 1024)
           for (const line of lines) {
             try {
               const entry = JSON.parse(line)

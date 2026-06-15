@@ -1,12 +1,11 @@
 const router = require('express').Router()
-const fs = require('fs')
 const { exec } = require('child_process')
-const { CONFIG_PATH } = require('../lib/config')
+const { readOpenclawConfig, writeOpenclawConfigAtomic } = require('../lib/openclaw-config')
 
 // GET /api/telegram — อ่าน telegram config
 router.get('/', (req, res) => {
   try {
-    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
+    const config = readOpenclawConfig()
     res.json(config.channels?.telegram || {})
   } catch (e) {
     console.error('[openclaw-api]', req.method, req.path, e.message)
@@ -17,10 +16,10 @@ router.get('/', (req, res) => {
 // PUT /api/telegram — แก้ telegram config (token, dmPolicy)
 router.put('/', (req, res) => {
   try {
-    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
+    const config = readOpenclawConfig()
     if (!config.channels) config.channels = {}
     config.channels.telegram = { ...config.channels.telegram, ...req.body }
-    fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2))
+    writeOpenclawConfigAtomic(config)
     res.json({ ok: true })
   } catch (e) {
     console.error('[openclaw-api]', req.method, req.path, e.message)
@@ -31,7 +30,7 @@ router.put('/', (req, res) => {
 // GET /api/telegram/botinfo — ดึงชื่อ bot จาก Telegram API
 router.get('/botinfo', async (req, res) => {
   try {
-    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
+    const config = readOpenclawConfig()
     const tg = config.channels?.telegram || {}
     const results = {}
 
@@ -69,7 +68,7 @@ router.get('/botinfo', async (req, res) => {
 // GET /api/telegram/status — เช็คสถานะ bot แต่ละ account (online/offline + ชื่อ)
 router.get('/status', async (req, res) => {
   try {
-    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
+    const config = readOpenclawConfig()
     const tg = config.channels?.telegram || {}
     const accounts = {}
 
@@ -108,7 +107,7 @@ router.post('/accounts', (req, res) => {
     const { accountId, token } = req.body
     if (!accountId || !token) return res.status(400).json({ error: 'accountId and token required' })
     if (accountId === 'default') return res.status(400).json({ error: 'accountId cannot be "default"' })
-    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
+    const config = readOpenclawConfig()
     if (!config.channels) config.channels = {}
     if (!config.channels.telegram) config.channels.telegram = {}
     if (!config.channels.telegram.accounts) config.channels.telegram.accounts = {}
@@ -122,7 +121,7 @@ router.post('/accounts', (req, res) => {
       groupPolicy: 'allowlist',
       streaming: 'partial',
     }
-    fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2))
+    writeOpenclawConfigAtomic(config)
     res.json({ ok: true })
   } catch (e) {
     console.error('[openclaw-api]', req.method, req.path, e.message)
@@ -137,7 +136,7 @@ router.post('/set-default', (req, res) => {
     const { accountId, oldAccountId } = req.body
     if (!accountId || !oldAccountId) return res.status(400).json({ error: 'accountId and oldAccountId required' })
     if (oldAccountId === 'default') return res.status(400).json({ error: 'oldAccountId cannot be "default"' })
-    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
+    const config = readOpenclawConfig()
     const tg = config.channels?.telegram
     if (!tg) return res.status(400).json({ error: 'No telegram config' })
 
@@ -169,7 +168,7 @@ router.post('/set-default', (req, res) => {
     // ลบ named account นั้นออก
     delete tg.accounts[accountId]
 
-    fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2))
+    writeOpenclawConfigAtomic(config)
     res.json({ ok: true })
   } catch (e) {
     console.error('[openclaw-api]', req.method, req.path, e.message)
@@ -182,7 +181,7 @@ router.delete('/accounts/:accountId', (req, res) => {
   try {
     const accountId = req.params.accountId
     if (accountId === 'default') return res.status(400).json({ error: 'Cannot delete default account' })
-    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
+    const config = readOpenclawConfig()
     if (!config.channels?.telegram?.accounts?.[accountId]) {
       return res.status(404).json({ error: `Account "${accountId}" not found` })
     }
@@ -194,7 +193,7 @@ router.delete('/accounts/:accountId', (req, res) => {
     config.bindings = (config.bindings || []).filter(
       b => !(b.type === 'route' && b.match?.accountId === accountId)
     )
-    fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2))
+    writeOpenclawConfigAtomic(config)
     res.json({ ok: true })
   } catch (e) {
     console.error('[openclaw-api]', req.method, req.path, e.message)
@@ -218,7 +217,7 @@ router.post('/approve', (req, res) => {
 // GET /api/telegram/bindings — route bindings (bot account → agent)
 router.get('/bindings', (req, res) => {
   try {
-    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
+    const config = readOpenclawConfig()
     const routes = (config.bindings || [])
       .filter(b => b.type === 'route' && b.match?.channel === 'telegram')
       .map(b => ({ agentId: b.agentId, accountId: b.match.accountId }))
@@ -234,7 +233,7 @@ router.put('/bindings', (req, res) => {
   try {
     const { accountId, agentId } = req.body
     if (!accountId) return res.status(400).json({ error: 'accountId required' })
-    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
+    const config = readOpenclawConfig()
     if (!config.bindings) config.bindings = []
     // ลบ route binding เดิมของ account นี้ออกก่อน
     config.bindings = config.bindings.filter(
@@ -244,7 +243,7 @@ router.put('/bindings', (req, res) => {
     if (agentId) {
       config.bindings.push({ type: 'route', agentId, match: { channel: 'telegram', accountId } })
     }
-    fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2))
+    writeOpenclawConfigAtomic(config)
     res.json({ ok: true })
   } catch (e) {
     console.error('[openclaw-api]', req.method, req.path, e.message)

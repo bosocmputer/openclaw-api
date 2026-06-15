@@ -14,27 +14,25 @@ openclaw-api (port 4000)
     │
     ├── อ่าน/เขียน ~/.openclaw/openclaw.json     ← config หลัก
     ├── อ่าน/เขียน ~/.openclaw/workspace-*/
-    │   ├── SOUL.md                               ← system prompt ของแต่ละ agent
-    │   └── config/mcporter.json                  ← MCP server URL + access mode
+    │   └── SOUL.md                               ← system prompt ของแต่ละ agent
+    ├── อ่าน/เขียน openclaw.json mcp.servers      ← MCP server URL + access mode
     ├── รัน openclaw CLI                           ← gateway restart, doctor
-    └── รัน mcporter CLI                          ← test MCP access (list tools เท่านั้น)
+    └── test MCP access ผ่าน native HTTP tools endpoint
 
 openclaw-gateway (agent runtime)
-    │ HTTP POST /call — direct (ไม่ผ่าน mcporter exec)
+    │ Native MCP tools from openclaw.json mcp.servers
     ▼
-SML MCP Connect (port 3002 by default)
+SML MCP Connect (SSE/tools endpoint)
     │
     └── PostgreSQL ERP Database
 ```
 
-> **v2 Integration**: Agent เรียก MCP tools ผ่าน `curl POST /call` โดยตรง แทน mcporter exec
-> ทำให้ response time ลดจาก ~48 วินาที เหลือ ~1-3 วินาที
+> **Native MCP Integration**: Agent เรียก MCP tools ผ่าน OpenClaw native MCP registry (`openclaw.json` → `mcp.servers`) และส่งสิทธิ์ด้วย header `mcp-access-mode`
 
 ## Requirements
 
 - Node.js 22+
 - openclaw CLI (`npm install -g openclaw`)
-- mcporter CLI (`npm install -g mcporter`)
 - openclaw-gateway รันเป็น systemd service อยู่แล้ว
 - PostgreSQL 16+ (สำหรับ /api/members และ /api/webchat/* endpoints)
 
@@ -86,9 +84,8 @@ node index.js
 
 ```bash
 cd ~/openclaw-api
-git fetch origin && git reset --hard origin/main
-npm install
-pm2 restart openclaw-api --update-env
+bash scripts/update-server.sh --dry-run
+bash scripts/update-server.sh --apply --mcp-url http://192.168.2.248:3515/sse --openrouter-key "$OPENROUTER_KEY"
 ```
 
 ---
@@ -101,10 +98,12 @@ openclaw-api/
 ├── lib/
 │   ├── config.js         ← shared constants: HOME, CONFIG_PATH, USERNAMES_PATH, execOpts
 │   ├── files.js          ← readConfig, writeConfig, readUserNames, writeUserNames
+│   ├── openclaw-config.js ← atomic openclaw.json reads/writes + lock + backup
 │   ├── pg.js             ← pgPool init + requirePg middleware
 │   └── soul-template.js  ← generateSoulTemplate (SOUL.md template per access mode/persona)
 └── routes/
     ├── status.js         ← GET /api/status
+    ├── system.js         ← GET /api/system/health, /api/system/support-bundle
     ├── config.js         ← GET /api/config, PUT /api/config
     ├── agents.js         ← /api/agents/* (CRUD + soul + mcp + users)
     ├── telegram.js       ← /api/telegram/* (accounts, bindings, botinfo, pairing)
@@ -129,6 +128,8 @@ openclaw-api/
 | Method | Path | Description |
 | ------ | ---- | ----------- |
 | GET | `/api/status` | gateway online/offline |
+| GET | `/api/system/health?refresh=false` | bounded cached system health |
+| GET | `/api/system/support-bundle` | redacted support bundle |
 | GET | `/api/config` | อ่าน openclaw.json |
 | PUT | `/api/config` | เขียน openclaw.json (atomic write) |
 
@@ -142,9 +143,9 @@ openclaw-api/
 | GET | `/api/agents/:id/soul` | อ่าน SOUL.md |
 | PUT | `/api/agents/:id/soul` | เขียน SOUL.md |
 | GET | `/api/agents/:id/soul/template` | ดึง SOUL template ตาม access mode + persona |
-| GET | `/api/agents/:id/mcp` | อ่าน mcporter.json |
-| PUT | `/api/agents/:id/mcp` | เขียน mcporter.json |
-| POST | `/api/agents/:id/mcp/test` | test MCP access (list tools) |
+| GET | `/api/agents/:id/mcp` | อ่าน openclaw.json `mcp.servers` |
+| PUT | `/api/agents/:id/mcp` | เขียน openclaw.json `mcp.servers` |
+| POST | `/api/agents/:id/mcp/test` | test MCP access (cached tool list, header `mcp-access-mode`) |
 | GET | `/api/agents/:id/users` | รายการ users ของ agent |
 | POST | `/api/agents/:id/users` | เพิ่ม user (peer binding + allowFrom อัตโนมัติ) |
 | DELETE | `/api/agents/:id/users/:userId` | ลบ user |
@@ -306,7 +307,7 @@ Authorization: Bearer <API_TOKEN>
 - **Webchat session key format** — `agent:{agentId}:hook:webchat:uid:{username}` — prefix `uid:` ป้องกัน conflict กับ LINE accountId
 - **Webchat → LINE bug** — ถ้า `agent:<id>:main` session มี `lastChannel=line` ค้างอยู่ gateway จะ reply ออก LINE แทน webchat — ดูวิธีแก้ใน INSTALL.md
 - **PostgreSQL constraint** — `admin_users_role_check` รองรับ role: `superadmin`, `admin`, `chat`
-- **SOUL.md template (v2)** — AI เรียก MCP ผ่าน `curl POST /call` โดยตรง ไม่ใช้ mcporter exec — URL derive จาก mcporter.json อัตโนมัติ (แทนที่ `/sse` ด้วย `/call`) — ทุก template มี `## ความจำระหว่าง Session` ให้ AI บันทึกชื่อ user ลง `memory/YYYY-MM-DD.md` ทันที
+- **SOUL.md template** — AI ใช้ native MCP tools ที่ register ใน `openclaw.json mcp.servers`; template ไม่สั่ง `curl`, `/call`, `exec tool`, หรือ `mcporter`; ทุก template มี `## ความจำระหว่าง Session` ให้ AI บันทึกชื่อ user ลง `memory/YYYY-MM-DD.md` ทันที
 - **`/api/memory/status`** — คืน `dailyMemory` field พร้อม `fileCount`, `totalChars`, `latestDate`, `files[]` — สะท้อน `memory/*.md` จริงที่ AI สร้างขึ้น
 - **`/api/monitor/events`** — อ่าน `.jsonl` files last 50 lines ต่อ session, `ts` field = UTC (ต้อง +7h บน client เพื่อแสดงเวลาไทย)
 - **LINE webhookPath ต้องไม่ซ้ำกัน** — ถ้า 2 OA ใช้ path เดียวกัน OA แรกได้ 401

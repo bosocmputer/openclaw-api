@@ -1,11 +1,10 @@
 const router = require('express').Router()
-const fs = require('fs')
-const { CONFIG_PATH } = require('../lib/config')
+const { readOpenclawConfig, writeOpenclawConfigAtomic } = require('../lib/openclaw-config')
 
 // GET /api/model — อ่าน model ปัจจุบัน
 router.get('/model', (req, res) => {
   try {
-    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
+    const config = readOpenclawConfig()
     res.json({ model: config.agents?.defaults?.model?.primary || '' })
   } catch (e) {
     console.error('[openclaw-api]', req.method, req.path, e.message)
@@ -18,12 +17,12 @@ router.put('/model', (req, res) => {
   try {
     const { model } = req.body
     if (!model) return res.status(400).json({ error: 'model required' })
-    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
+    const config = readOpenclawConfig()
     if (!config.agents) config.agents = {}
     if (!config.agents.defaults) config.agents.defaults = {}
     if (!config.agents.defaults.model) config.agents.defaults.model = {}
     config.agents.defaults.model.primary = model
-    fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2))
+    writeOpenclawConfigAtomic(config)
     res.json({ ok: true })
   } catch (e) {
     console.error('[openclaw-api]', req.method, req.path, e.message)
@@ -34,7 +33,7 @@ router.put('/model', (req, res) => {
 // GET /api/models?provider=openrouter|anthropic|google|openai|mistral|groq|kilocode
 router.get('/models', async (req, res) => {
   try {
-    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
+    const config = readOpenclawConfig()
     const provider = req.query.provider || 'openrouter'
 
     if (provider === 'openrouter') {

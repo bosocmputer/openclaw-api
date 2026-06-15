@@ -1,7 +1,8 @@
 const router = require('express').Router()
 const fs = require('fs')
 const path = require('path')
-const { HOME, CONFIG_PATH } = require('../lib/config')
+const { HOME } = require('../lib/config')
+const { readOpenclawConfig } = require('../lib/openclaw-config')
 
 function readWorkspaceMemory(workspacePath) {
   const memoryDir = path.join(workspacePath, 'memory')
@@ -40,7 +41,7 @@ function readWorkspaceMemory(workspacePath) {
 // GET /api/memory/status
 router.get('/status', (req, res) => {
   try {
-    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
+    const config = readOpenclawConfig()
     const agents = config.agents?.list ?? []
     const dreamingEnabled = config.memory?.dreaming?.enabled ?? false
     const dreamingConfig = config.memory?.dreaming ?? null
@@ -101,7 +102,7 @@ router.get('/status', (req, res) => {
 // GET /api/memory/:agentId/memory — อ่าน MEMORY.md
 router.get('/:agentId/memory', (req, res) => {
   try {
-    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
+    const config = readOpenclawConfig()
     const agent = config.agents?.list?.find(a => a.id === req.params.agentId)
     if (!agent) return res.status(404).json({ error: 'Agent not found' })
     const memPath = path.join(agent.workspace.replace('~', HOME), 'MEMORY.md')
@@ -115,7 +116,7 @@ router.get('/:agentId/memory', (req, res) => {
 // GET /api/memory/:agentId/dreams — อ่าน dreams.md
 router.get('/:agentId/dreams', (req, res) => {
   try {
-    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
+    const config = readOpenclawConfig()
     const agent = config.agents?.list?.find(a => a.id === req.params.agentId)
     if (!agent) return res.status(404).json({ error: 'Agent not found' })
     const dreamsPath = path.join(agent.workspace.replace('~', HOME), 'dreams.md')
@@ -129,7 +130,7 @@ router.get('/:agentId/dreams', (req, res) => {
 // GET /api/memory/:agentId/daily/:filename — อ่าน daily memory file
 router.get('/:agentId/daily/:filename', (req, res) => {
   try {
-    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
+    const config = readOpenclawConfig()
     const agent = config.agents?.list?.find(a => a.id === req.params.agentId)
     if (!agent) return res.status(404).json({ error: 'Agent not found' })
     // sanitize filename — allow only YYYY-MM-DD*.md pattern

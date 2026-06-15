@@ -12,7 +12,8 @@ const router = require('express').Router()
 const crypto = require('crypto')
 const fs = require('fs')
 const path = require('path')
-const { CONFIG_PATH, HOME } = require('../lib/config')
+const { HOME } = require('../lib/config')
+const { readOpenclawConfig, writeOpenclawConfigAtomic } = require('../lib/openclaw-config')
 
 const CLIENT_ID = Buffer.from('OWQxYzI1MGEtZTYxYi00NGQ5LTg4ZWQtNTk0NGQxOTYyZjVl', 'base64').toString('utf8')
 const AUTHORIZE_URL = 'https://claude.ai/oauth/authorize'
@@ -171,12 +172,10 @@ router.post('/anthropic/submit', async (req, res) => {
 
     // เก็บ token ใน openclaw.json เป็น ANTHROPIC_API_KEY
     let config = {}
-    try { config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) } catch {}
+    try { config = readOpenclawConfig() } catch {}
     if (!config.env) config.env = {}
     config.env.ANTHROPIC_API_KEY = accessToken
-    const tmpPath = CONFIG_PATH + '.tmp'
-    fs.writeFileSync(tmpPath, JSON.stringify(config, null, 2))
-    fs.renameSync(tmpPath, CONFIG_PATH)
+    writeOpenclawConfigAtomic(config, { reason: 'anthropic-oauth' })
 
     res.json({ ok: true, message: 'เชื่อมต่อ Anthropic Account สำเร็จ — token บันทึกแล้ว' })
   } catch (e) {

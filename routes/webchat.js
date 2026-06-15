@@ -1,8 +1,9 @@
 const router = require('express').Router()
 const fs = require('fs')
 const path = require('path')
-const { HOME, CONFIG_PATH } = require('../lib/config')
+const { HOME } = require('../lib/config')
 const { pgPool, requirePg } = require('../lib/pg')
+const { readOpenclawConfig } = require('../lib/openclaw-config')
 
 // Strip gateway-injected metadata headers from user messages (Telegram + Webchat)
 function stripGatewayMetadata(text) {
@@ -156,7 +157,7 @@ router.post('/send', requirePg, async (req, res) => {
 
     // อ่าน config เพื่อหา hooks port
     let config = {}
-    try { config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) } catch {}
+    try { config = readOpenclawConfig() } catch {}
     const hooksPort = config?.gateway?.hooksPort || 18789
     const hooksToken = process.env.HOOKS_TOKEN || config?.hooks?.token || ''
     const sessionKey = `hook:webchat:uid:${username}`

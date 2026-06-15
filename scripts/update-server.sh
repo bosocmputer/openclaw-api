@@ -1,146 +1,371 @@
-#!/bin/bash
-# ============================================================
-# OpenClaw Server Update Script
-# ส่งให้ทีมงานรันบน server ลูกค้า
+#!/usr/bin/env bash
+# OpenClaw production updater.
 #
-# วิธีใช้:
-#   bash update-server.sh
-#
-# สิ่งที่ script นี้ทำ:
-#   1. อัปเดต openclaw-api (routes + code)
-#   2. อัปเดต openclaw-admin (Docker)
-#   3. ลบ mcporter.json เก่าทุก workspace
-#   4. ตั้ง /etc/hosts Telegram (ลด latency)
-#   5. Restart openclaw-api และ gateway
-# ============================================================
+# Usage:
+#   bash scripts/update-server.sh --dry-run
+#   bash scripts/update-server.sh --apply --mcp-url http://192.168.2.248:3515/sse --openrouter-key "$KEY"
+#   bash scripts/update-server.sh --rollback <backup-id>
+#   bash scripts/update-server.sh --health-only
 
-set -e
+set -euo pipefail
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-log()  { echo -e "${BLUE}[INFO]${NC} $1"; }
-ok()   { echo -e "${GREEN}[OK]${NC}   $1"; }
-warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
-err()  { echo -e "${RED}[ERR]${NC}  $1"; }
+API_DIR="${API_DIR:-$HOME/openclaw-api}"
+ADMIN_DIR="${ADMIN_DIR:-$HOME/openclaw-admin}"
+STATE_DIR="${STATE_DIR:-$HOME/.openclaw}"
+CONFIG_PATH="$STATE_DIR/openclaw.json"
+API_URL="${API_URL:-http://127.0.0.1:4000}"
+PM2_PROCESS="${PM2_PROCESS:-openclaw-api}"
+DEFAULT_MCP_URL="http://192.168.2.248:3515/sse"
 
-echo ""
-echo "=================================================="
-echo "  OpenClaw Server Update"
-echo "  $(date '+%Y-%m-%d %H:%M:%S')"
-echo "=================================================="
-echo ""
+MODE="dry-run"
+MCP_URL="$DEFAULT_MCP_URL"
+OPENROUTER_KEY="${OPENROUTER_KEY:-}"
+ROLLBACK_ID=""
+BACKUP_ID="$(date +%Y%m%d%H%M%S)"
+BACKUP_ROOT="$STATE_DIR/backups/openclaw-update-$BACKUP_ID"
+CHANGED_API=0
+CHANGED_ADMIN=0
+CHANGED_STATE=0
 
-# ─── 1. openclaw-api ──────────────────────────────────────
-log "Step 1: Updating openclaw-api..."
-if [ -d ~/openclaw-api ]; then
-  cd ~/openclaw-api
-  git pull origin main
-  ok "openclaw-api updated"
-else
-  err "~/openclaw-api not found — skipping"
-fi
+log()  { echo -e "${BLUE}[INFO]${NC} $*"; }
+ok()   { echo -e "${GREEN}[OK]${NC}   $*"; }
+warn() { echo -e "${YELLOW}[WARN]${NC} $*"; }
+err()  { echo -e "${RED}[ERR]${NC}  $*" >&2; }
 
-# ─── 2. openclaw-admin (Docker) ───────────────────────────
-log "Step 2: Updating openclaw-admin (Docker build)..."
-if [ -d ~/openclaw-admin ]; then
-  cd ~/openclaw-admin
-  git pull origin main
-  docker compose up -d --build
-  ok "openclaw-admin updated"
-else
-  err "~/openclaw-admin not found — skipping"
-fi
+usage() {
+  sed -n '1,14p' "$0"
+}
 
-# ─── 3. ลบ mcporter.json เก่า ─────────────────────────────
-log "Step 3: Removing legacy mcporter.json files..."
-REMOVED=0
-for f in $(find ~/.openclaw/workspace-*/config -name "mcporter.json" 2>/dev/null); do
-  rm "$f"
-  warn "Removed: $f"
-  REMOVED=$((REMOVED+1))
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run) MODE="dry-run"; shift ;;
+    --apply) MODE="apply"; shift ;;
+    --health-only) MODE="health-only"; shift ;;
+    --rollback) MODE="rollback"; ROLLBACK_ID="${2:-}"; shift 2 ;;
+    --mcp-url) MCP_URL="${2:-}"; shift 2 ;;
+    --openrouter-key) OPENROUTER_KEY="${2:-}"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) err "Unknown option: $1"; usage; exit 2 ;;
+  esac
 done
-for d in $(find ~/.openclaw/workspace-*/skills -name "mcporter" -type d 2>/dev/null); do
-  rm -rf "$d"
-  warn "Removed dir: $d"
-done
-if [ $REMOVED -eq 0 ]; then
-  ok "No mcporter.json files found (already clean)"
-else
-  ok "Removed $REMOVED mcporter.json file(s)"
+
+if [[ "$MODE" == "rollback" && -z "$ROLLBACK_ID" ]]; then
+  err "--rollback requires a backup id"
+  exit 2
 fi
 
-# ─── 4. Telegram /etc/hosts fix ───────────────────────────
-log "Step 4: Fixing Telegram DNS (testing IPs)..."
-BEST_IP=""
-BEST_TIME=9999
-
-for ip in 149.154.166.110 149.154.167.110 149.154.165.110 149.154.168.110 149.154.175.110; do
-  # ทดสอบ HTTPS connectivity
-  result=$(curl -sk -o /dev/null -w "%{http_code}" \
-    --connect-timeout 4 --resolve "api.telegram.org:443:$ip" \
-    "https://api.telegram.org/bot_test/getMe" 2>/dev/null)
-  if [ "$result" = "404" ] || [ "$result" = "401" ]; then
-    # 404/401 = IP ทำงานได้ (token ผิดแค่ไม่มี bot token จริง)
-    ping_ms=$(ping -c1 -W2 "$ip" 2>/dev/null | grep -oP 'time=\K[\d.]+' || echo "9999")
-    ping_int=${ping_ms%.*}
-    echo "    $ip: HTTP=$result ping=${ping_ms}ms"
-    if [ "$ping_int" -lt "$BEST_TIME" ] 2>/dev/null; then
-      BEST_TIME=$ping_int
-      BEST_IP=$ip
-    fi
+run() {
+  if [[ "$MODE" == "dry-run" ]]; then
+    echo "DRY-RUN: $*"
   else
-    echo "    $ip: unreachable (HTTP=$result)"
+    "$@"
   fi
-done
+}
 
-if [ -n "$BEST_IP" ]; then
-  # ลบ entry เก่า แล้วเพิ่มใหม่
+load_api_token() {
+  if [[ -n "${API_TOKEN:-}" ]]; then return 0; fi
+  if [[ -f "$API_DIR/.env" ]]; then
+    API_TOKEN="$(grep -E '^API_TOKEN=' "$API_DIR/.env" | tail -1 | cut -d= -f2- | tr -d '"' || true)"
+    export API_TOKEN
+  fi
+}
+
+health_check() {
+  load_api_token
+  if [[ -z "${API_TOKEN:-}" ]]; then
+    err "API_TOKEN not found in env or $API_DIR/.env"
+    return 1
+  fi
+  curl -fsS "$API_URL/api/system/health?refresh=true" \
+    -H "Authorization: Bearer $API_TOKEN" \
+    | node -e '
+      let data = "";
+      process.stdin.on("data", d => data += d);
+      process.stdin.on("end", () => {
+        const j = JSON.parse(data);
+        console.log(JSON.stringify(j, null, 2).replace(/sk-or-[A-Za-z0-9_-]+/g, "sk-or-<redacted>"));
+        const critical = (j.checks || []).filter(c => c.severity === "critical" && c.status === "fail");
+        if (critical.length) process.exit(3);
+      });
+    '
+}
+
+preflight() {
+  log "Preflight"
+  [[ -d "$API_DIR" ]] || { err "$API_DIR not found"; exit 1; }
+  [[ -d "$ADMIN_DIR" ]] || { err "$ADMIN_DIR not found"; exit 1; }
+  [[ -f "$CONFIG_PATH" ]] || { err "$CONFIG_PATH not found"; exit 1; }
+  command -v git >/dev/null || { err "git not found"; exit 1; }
+  command -v node >/dev/null || { err "node not found"; exit 1; }
+  command -v curl >/dev/null || { err "curl not found"; exit 1; }
+  command -v pm2 >/dev/null || warn "pm2 not found in PATH"
+  command -v docker >/dev/null || warn "docker not found in PATH"
+  load_api_token
+  [[ -n "${API_TOKEN:-}" ]] && ok "API token found" || warn "API token not found; health/restart checks may fail"
+  node -e "JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'))" "$CONFIG_PATH"
+  ok "openclaw.json parses"
+  curl -fsS --max-time 3 "$(echo "$MCP_URL" | sed -E 's#/(sse|mcp|call)(/.*)?$##')/tools" \
+    -H "mcp-access-mode: general" >/dev/null \
+    && ok "MCP reachable: $MCP_URL" \
+    || warn "MCP tools endpoint not reachable during preflight: $MCP_URL"
+}
+
+backup_state() {
+  log "Creating backup $BACKUP_ID"
+  run mkdir -p "$BACKUP_ROOT/files"
+  if [[ "$MODE" == "dry-run" ]]; then return 0; fi
+
+  cp "$CONFIG_PATH" "$BACKUP_ROOT/openclaw.json"
+  git -C "$API_DIR" rev-parse HEAD > "$BACKUP_ROOT/openclaw-api.head"
+  git -C "$ADMIN_DIR" rev-parse HEAD > "$BACKUP_ROOT/openclaw-admin.head"
+
+  find "$STATE_DIR/agents" -type f \( -name "auth-profiles.json" -o -name "SOUL.md" \) 2>/dev/null | while read -r file; do
+    rel="${file#$HOME/}"
+    mkdir -p "$BACKUP_ROOT/files/$(dirname "$rel")"
+    cp "$file" "$BACKUP_ROOT/files/$rel"
+  done
+  ok "Backup stored at $BACKUP_ROOT"
+}
+
+restore_backup() {
+  local id="$1"
+  local root="$STATE_DIR/backups/openclaw-update-$id"
+  [[ -d "$root" ]] || { err "Backup not found: $root"; exit 1; }
+  log "Restoring backup $id"
+  cp "$CONFIG_PATH" "$CONFIG_PATH.before-rollback.$(date +%Y%m%d%H%M%S)" 2>/dev/null || true
+  cp "$root/openclaw.json" "$CONFIG_PATH"
+  if [[ -d "$root/files" ]]; then
+    (cd "$root/files" && find . -type f) | while read -r rel; do
+      rel="${rel#./}"
+      mkdir -p "$HOME/$(dirname "$rel")"
+      cp "$root/files/$rel" "$HOME/$rel"
+    done
+  fi
+  if [[ -f "$root/openclaw-api.head" ]]; then
+    git -C "$API_DIR" checkout "$(cat "$root/openclaw-api.head")" -- .
+  fi
+  if [[ -f "$root/openclaw-admin.head" ]]; then
+    git -C "$ADMIN_DIR" checkout "$(cat "$root/openclaw-admin.head")" -- .
+  fi
+  ok "Rollback files restored"
+  restart_changed "rollback"
+}
+
+update_repo() {
+  local dir="$1"
+  local label="$2"
+  local before after
+  before="$(git -C "$dir" rev-parse HEAD)"
+  run git -C "$dir" pull --ff-only origin main
+  if [[ "$MODE" == "dry-run" ]]; then return 0; fi
+  after="$(git -C "$dir" rev-parse HEAD)"
+  if [[ "$before" != "$after" ]]; then
+    ok "$label updated: ${before:0:8} -> ${after:0:8}"
+    [[ "$label" == "openclaw-api" ]] && CHANGED_API=1 || CHANGED_ADMIN=1
+  else
+    ok "$label already current"
+  fi
+}
+
+atomic_write_json() {
+  local file="$1"
+  local tmp="$file.tmp.$$"
+  node -e '
+    const fs = require("fs");
+    const file = process.argv[1];
+    const tmp = process.argv[2];
+    const input = fs.readFileSync(0, "utf8");
+    JSON.parse(input);
+    const fd = fs.openSync(tmp, "w", 0o600);
+    fs.writeFileSync(fd, input);
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fs.renameSync(tmp, file);
+  ' "$file" "$tmp"
+}
+
+configure_mcp() {
+  log "Ensuring native MCP servers in openclaw.json"
+  if [[ "$MODE" == "dry-run" ]]; then
+    echo "DRY-RUN: configure every agent MCP URL=$MCP_URL with mcp-access-mode header"
+    return 0
+  fi
+  node - "$CONFIG_PATH" "$MCP_URL" <<'NODE' | atomic_write_json "$CONFIG_PATH"
+const fs = require('fs')
+const [configPath, mcpUrl] = process.argv.slice(2)
+const config = JSON.parse(fs.readFileSync(configPath, 'utf8'))
+const agents = config.agents?.list || []
+config.mcp ??= {}
+config.mcp.servers ??= {}
+for (const agent of agents) {
+  const id = agent.id
+  const legacy = config.mcp.servers[`sml-${id}`]
+  const current = config.mcp.servers[id] || legacy || {}
+  const accessMode = current.headers?.['mcp-access-mode'] || current.env?.MCP_ACCESS_MODE || id
+  config.mcp.servers[id] = {
+    url: current.url || mcpUrl,
+    transport: (current.url || mcpUrl).includes('/sse') ? 'sse' : 'streamable-http',
+    headers: { ...(current.headers || {}), 'mcp-access-mode': accessMode },
+  }
+  delete config.mcp.servers[`sml-${id}`]
+}
+process.stdout.write(JSON.stringify(config, null, 2))
+NODE
+  CHANGED_STATE=1
+  ok "MCP config updated without legacy sml-* entries"
+}
+
+rotate_openrouter_key() {
+  if [[ -z "$OPENROUTER_KEY" ]]; then
+    warn "No --openrouter-key provided; skipping key rotation"
+    return 0
+  fi
+  log "Rotating OpenRouter key in every agent auth profile"
+  if [[ "$MODE" == "dry-run" ]]; then
+    echo "DRY-RUN: update auth-profiles.json for all agents; key will not be printed"
+    return 0
+  fi
+  OPENROUTER_KEY="$OPENROUTER_KEY" node - "$CONFIG_PATH" "$STATE_DIR" "$BACKUP_ID" <<'NODE'
+const fs = require('fs')
+const path = require('path')
+const [configPath, stateDir, backupId] = process.argv.slice(2)
+const key = process.env.OPENROUTER_KEY
+const config = JSON.parse(fs.readFileSync(configPath, 'utf8'))
+let count = 0
+for (const agent of config.agents?.list || []) {
+  const authPath = path.join(stateDir, 'agents', agent.id, 'agent', 'auth-profiles.json')
+  fs.mkdirSync(path.dirname(authPath), { recursive: true })
+  let store = { version: 1, profiles: {} }
+  try { store = JSON.parse(fs.readFileSync(authPath, 'utf8')) } catch {}
+  store.version ||= 1
+  store.profiles ||= {}
+  const ids = Object.keys(store.profiles).filter(id => id === 'openrouter:default' || id.startsWith('openrouter:'))
+  if (ids.length === 0) ids.push('openrouter:default')
+  for (const id of ids) {
+    const existing = store.profiles[id] || {}
+    store.profiles[id] = { ...existing, type: 'api_key', provider: 'openrouter', key }
+  }
+  if (fs.existsSync(authPath)) fs.copyFileSync(authPath, `${authPath}.bak.${backupId}`)
+  const tmp = `${authPath}.tmp.${process.pid}`
+  fs.writeFileSync(tmp, JSON.stringify(store, null, 2), { mode: 0o600 })
+  fs.renameSync(tmp, authPath)
+  count++
+}
+if (!config.env) config.env = {}
+config.env.OPENROUTER_API_KEY = key
+const tmpConfig = `${configPath}.tmp.${process.pid}`
+fs.writeFileSync(tmpConfig, JSON.stringify(config, null, 2), { mode: 0o600 })
+fs.renameSync(tmpConfig, configPath)
+console.log(`updated auth profiles: ${count}`)
+NODE
+  CHANGED_STATE=1
+}
+
+fix_telegram_hosts() {
+  log "Checking Telegram hosts pin"
+  if grep -qE '149\.154\.166\.110\s+api\.telegram\.org' /etc/hosts 2>/dev/null; then
+    ok "api.telegram.org already pinned to 149.154.166.110"
+    return 0
+  fi
+  if [[ "$MODE" == "dry-run" ]]; then
+    echo "DRY-RUN: sudo update /etc/hosts for api.telegram.org -> 149.154.166.110"
+    return 0
+  fi
+  if ! sudo -n true 2>/dev/null; then
+    warn "sudo without password is not available; run manually:"
+    echo "  sudo sed -i '/api\\.telegram\\.org/d' /etc/hosts"
+    echo "  echo '149.154.166.110 api.telegram.org api4.telegram.org' | sudo tee -a /etc/hosts"
+    return 0
+  fi
   sudo sed -i '/api\.telegram\.org/d' /etc/hosts 2>/dev/null || true
   sudo sed -i '/api4\.telegram\.org/d' /etc/hosts 2>/dev/null || true
-  echo "$BEST_IP  api.telegram.org api4.telegram.org" | sudo tee -a /etc/hosts > /dev/null
-  ok "Set api.telegram.org → $BEST_IP (${BEST_TIME}ms)"
-else
-  warn "Could not find a working Telegram IP — skipping hosts fix"
-fi
+  echo '149.154.166.110 api.telegram.org api4.telegram.org' | sudo tee -a /etc/hosts >/dev/null
+  ok "Telegram hosts pin updated"
+}
 
-# ─── 5. Restart openclaw-api ──────────────────────────────
-log "Step 5: Restarting openclaw-api..."
-PM2=~/.npm-global/bin/pm2
-if [ -f "$PM2" ]; then
-  $PM2 restart openclaw-api
-  sleep 2
-  $PM2 list | grep openclaw-api
-  ok "openclaw-api restarted"
-else
-  err "pm2 not found at $PM2"
-fi
+build_admin_if_needed() {
+  if [[ "$MODE" == "dry-run" ]]; then
+    echo "DRY-RUN: docker compose up -d --build when admin repo changed"
+    return 0
+  fi
+  if [[ "$CHANGED_ADMIN" -eq 1 ]]; then
+    run docker compose -f "$ADMIN_DIR/docker-compose.yml" up -d --build
+  fi
+}
 
-# ─── 6. Restart gateway ───────────────────────────────────
-log "Step 6: Restarting openclaw gateway..."
-API_TOKEN=$(grep API_TOKEN ~/openclaw-api/.env 2>/dev/null | cut -d= -f2)
-if [ -n "$API_TOKEN" ]; then
-  RESULT=$(curl -s -X POST http://localhost:4000/api/gateway/restart \
-    -H "Authorization: Bearer $API_TOKEN" 2>/dev/null)
-  echo "    gateway restart: $RESULT"
-  ok "Gateway restarted"
-else
-  warn "API_TOKEN not found — gateway not restarted"
-fi
+restart_changed() {
+  local reason="${1:-apply}"
+  if [[ "$MODE" == "dry-run" ]]; then
+    echo "DRY-RUN: restart $PM2_PROCESS only if code/state changed"
+    echo "DRY-RUN: restart openclaw gateway if state changed"
+    return 0
+  fi
+  load_api_token
+  if [[ "$CHANGED_API" -eq 1 || "$CHANGED_STATE" -eq 1 || "$reason" == "rollback" ]]; then
+    if command -v pm2 >/dev/null; then
+      pm2 restart "$PM2_PROCESS"
+      ok "$PM2_PROCESS restarted"
+    else
+      warn "pm2 not found; API restart skipped"
+    fi
+  else
+    ok "API restart skipped; no API/state change"
+  fi
+  if [[ -n "${API_TOKEN:-}" && ( "$CHANGED_STATE" -eq 1 || "$CHANGED_API" -eq 1 || "$reason" == "rollback" ) ]]; then
+    curl -fsS -X POST "$API_URL/api/gateway/restart" -H "Authorization: Bearer $API_TOKEN" >/dev/null \
+      && ok "Gateway restarted" \
+      || warn "Gateway restart request failed"
+  fi
+}
 
-# ─── 7. ตรวจ MCP servers ──────────────────────────────────
-log "Step 7: Checking MCP servers..."
-sleep 3
-HOME_DIR=$HOME /usr/bin/node /usr/lib/node_modules/openclaw/dist/index.js mcp list 2>/dev/null \
-  | grep -E "sml-|No MCP" || warn "Could not list MCP servers"
+main_apply() {
+  preflight
+  backup_state
+  update_repo "$API_DIR" "openclaw-api"
+  update_repo "$ADMIN_DIR" "openclaw-admin"
+  configure_mcp
+  rotate_openrouter_key
+  fix_telegram_hosts
+  build_admin_if_needed
+  restart_changed "apply"
+  log "Post-check health"
+  if health_check; then
+    ok "Health check passed"
+  else
+    err "Health check reported critical failures"
+    echo "Rollback command:"
+    echo "  bash $API_DIR/scripts/update-server.sh --rollback $BACKUP_ID"
+    exit 3
+  fi
+  ok "Update complete. backup-id=$BACKUP_ID"
+}
 
-echo ""
-echo "=================================================="
-ok "Update complete!"
-echo ""
-echo "  ถัดไป: ตรวจสอบในหน้า Admin > Monitor"
-echo "  และทดสอบส่งข้อความผ่าน Telegram"
-echo "=================================================="
-echo ""
+case "$MODE" in
+  dry-run)
+    preflight
+    backup_state
+    update_repo "$API_DIR" "openclaw-api"
+    update_repo "$ADMIN_DIR" "openclaw-admin"
+    configure_mcp
+    rotate_openrouter_key
+    fix_telegram_hosts
+    restart_changed "dry-run"
+    ok "Dry run complete; no files changed"
+    ;;
+  apply)
+    main_apply
+    ;;
+  health-only)
+    health_check
+    ;;
+  rollback)
+    restore_backup "$ROLLBACK_ID"
+    health_check || warn "Health still reports failures after rollback"
+    ;;
+esac

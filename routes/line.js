@@ -2,7 +2,8 @@ const router = require('express').Router()
 const fs = require('fs')
 const path = require('path')
 const { exec } = require('child_process')
-const { HOME, CONFIG_PATH, execOpts } = require('../lib/config')
+const { HOME, execOpts } = require('../lib/config')
+const { readOpenclawConfig, writeOpenclawConfigAtomic } = require('../lib/openclaw-config')
 
 async function fetchLineBotInfo(token) {
   const controller = new AbortController()
@@ -25,7 +26,7 @@ async function fetchLineBotInfo(token) {
 // GET /api/line — อ่าน LINE config ปัจจุบัน
 router.get('/', (req, res) => {
   try {
-    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
+    const config = readOpenclawConfig()
     const line = config.channels?.line || null
     res.json({ line })
   } catch (e) {
@@ -37,7 +38,7 @@ router.get('/', (req, res) => {
 // GET /api/line/botinfo — ดึงชื่อ/รูป bot ทุก account { accountId: { displayName, pictureUrl, basicId } }
 router.get('/botinfo', async (req, res) => {
   try {
-    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
+    const config = readOpenclawConfig()
     const line = config.channels?.line || {}
     const results = {}
     // format ใหม่: token อยู่ใน accounts.*
@@ -67,7 +68,7 @@ router.post('/accounts', (req, res) => {
     if (!accountId || !channelAccessToken || !channelSecret) {
       return res.status(400).json({ error: 'accountId, channelAccessToken and channelSecret required' })
     }
-    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
+    const config = readOpenclawConfig()
     if (!config.channels) config.channels = {}
     if (!config.channels.line) config.channels.line = { enabled: true, dmPolicy: 'pairing', groupPolicy: 'disabled' }
     const line = config.channels.line
@@ -96,7 +97,7 @@ router.post('/accounts', (req, res) => {
       if (webhookPath) acc.webhookPath = webhookPath
       line.accounts[accountId] = acc
     }
-    fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2))
+    writeOpenclawConfigAtomic(config)
     res.json({ ok: true })
   } catch (e) {
     console.error('[openclaw-api]', req.method, req.path, e.message)
@@ -108,7 +109,7 @@ router.post('/accounts', (req, res) => {
 router.delete('/accounts/:accountId', (req, res) => {
   try {
     const { accountId } = req.params
-    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
+    const config = readOpenclawConfig()
     const line = config.channels?.line
     if (!line) return res.status(404).json({ error: 'LINE not configured' })
 
@@ -135,7 +136,7 @@ router.delete('/accounts/:accountId', (req, res) => {
     config.bindings = (config.bindings || []).filter(
       b => !(b.type === 'route' && b.match?.channel === 'line' && b.match?.accountId === accountId)
     )
-    fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2))
+    writeOpenclawConfigAtomic(config)
     res.json({ ok: true })
   } catch (e) {
     console.error('[openclaw-api]', req.method, req.path, e.message)
@@ -152,7 +153,7 @@ router.patch('/accounts/:accountId', (req, res) => {
     if (!channelAccessToken && !channelSecret && webhookPath === undefined) {
       return res.status(400).json({ error: 'ต้องระบุอย่างน้อยหนึ่งฟิลด์: channelAccessToken, channelSecret, webhookPath' })
     }
-    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
+    const config = readOpenclawConfig()
     const line = config.channels?.line
     if (!line) return res.status(404).json({ error: 'LINE not configured' })
 
@@ -183,7 +184,7 @@ router.patch('/accounts/:accountId', (req, res) => {
         else delete line.accounts[accountId].webhookPath
       }
     }
-    fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2))
+    writeOpenclawConfigAtomic(config)
     res.json({ ok: true })
   } catch (e) {
     console.error('[openclaw-api]', req.method, req.path, e.message)
@@ -194,7 +195,7 @@ router.patch('/accounts/:accountId', (req, res) => {
 // GET /api/line/bindings — route bindings ทุก account [{ accountId, agentId }]
 router.get('/bindings', (req, res) => {
   try {
-    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
+    const config = readOpenclawConfig()
     const routes = (config.bindings || [])
       .filter(b => b.type === 'route' && b.match?.channel === 'line')
       .map(b => ({ accountId: b.match.accountId, agentId: b.agentId }))
@@ -211,7 +212,7 @@ router.put('/bindings', (req, res) => {
   try {
     const { accountId, agentId } = req.body
     if (!accountId) return res.status(400).json({ error: 'accountId required' })
-    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
+    const config = readOpenclawConfig()
     if (!config.bindings) config.bindings = []
     config.bindings = config.bindings.filter(
       b => !(b.type === 'route' && b.match?.channel === 'line' && b.match?.accountId === accountId)
@@ -219,7 +220,7 @@ router.put('/bindings', (req, res) => {
     if (agentId) {
       config.bindings.push({ type: 'route', agentId, match: { channel: 'line', accountId } })
     }
-    fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2))
+    writeOpenclawConfigAtomic(config)
     res.json({ ok: true })
   } catch (e) {
     console.error('[openclaw-api]', req.method, req.path, e.message)

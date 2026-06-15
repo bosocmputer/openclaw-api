@@ -1,6 +1,5 @@
 const router = require('express').Router()
-const fs = require('fs')
-const { CONFIG_PATH } = require('../lib/config')
+const { readOpenclawConfig, writeOpenclawConfigAtomic } = require('../lib/openclaw-config')
 
 // helper — อ่าน webhook routes จาก plugins.entries.webhooks.config.routes
 function getWebhookRoutes(config) {
@@ -19,7 +18,7 @@ function setWebhookRoutes(config, routes) {
 // GET /api/webhooks — รายการ webhook routes ทั้งหมด
 router.get('/', (req, res) => {
   try {
-    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
+    const config = readOpenclawConfig()
     const routes = getWebhookRoutes(config)
     // ไม่ส่ง secret value ออก — mask แทน
     const safe = {}
@@ -43,7 +42,7 @@ router.post('/', (req, res) => {
     if (!/^[a-z0-9_-]+$/.test(name))
       return res.status(400).json({ error: 'name ต้องเป็น lowercase a-z 0-9 _ - เท่านั้น' })
 
-    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
+    const config = readOpenclawConfig()
     const routes = getWebhookRoutes(config)
 
     routes[name] = {
@@ -54,7 +53,7 @@ router.post('/', (req, res) => {
       ...(enabled !== undefined ? { enabled } : {}),
     }
     setWebhookRoutes(config, routes)
-    fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2))
+    writeOpenclawConfigAtomic(config)
     res.json({ ok: true })
   } catch (e) {
     console.error('[openclaw-api]', req.method, req.path, e.message)
@@ -65,13 +64,13 @@ router.post('/', (req, res) => {
 // DELETE /api/webhooks/:name — ลบ route
 router.delete('/:name', (req, res) => {
   try {
-    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
+    const config = readOpenclawConfig()
     const routes = getWebhookRoutes(config)
     if (!routes[req.params.name])
       return res.status(404).json({ error: 'Route not found' })
     delete routes[req.params.name]
     setWebhookRoutes(config, routes)
-    fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2))
+    writeOpenclawConfigAtomic(config)
     res.json({ ok: true })
   } catch (e) {
     console.error('[openclaw-api]', req.method, req.path, e.message)
@@ -82,7 +81,7 @@ router.delete('/:name', (req, res) => {
 // PATCH /api/webhooks/:name — toggle enabled / แก้ description
 router.patch('/:name', (req, res) => {
   try {
-    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
+    const config = readOpenclawConfig()
     const routes = getWebhookRoutes(config)
     if (!routes[req.params.name])
       return res.status(404).json({ error: 'Route not found' })
@@ -90,7 +89,7 @@ router.patch('/:name', (req, res) => {
     if (enabled !== undefined) routes[req.params.name].enabled = Boolean(enabled)
     if (description !== undefined) routes[req.params.name].description = description
     setWebhookRoutes(config, routes)
-    fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2))
+    writeOpenclawConfigAtomic(config)
     res.json({ ok: true })
   } catch (e) {
     console.error('[openclaw-api]', req.method, req.path, e.message)

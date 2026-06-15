@@ -1,12 +1,13 @@
 const router = require('express').Router()
 const fs = require('fs')
 const path = require('path')
-const { HOME, CONFIG_PATH } = require('../lib/config')
+const { HOME } = require('../lib/config')
+const { readOpenclawConfig } = require('../lib/openclaw-config')
 
 // GET /api/compaction/checkpoints/:agentId — รายการ checkpoints ของ agent
 router.get('/checkpoints/:agentId', (req, res) => {
   try {
-    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
+    const config = readOpenclawConfig()
     const agent = config.agents?.list?.find(a => a.id === req.params.agentId)
     if (!agent) return res.status(404).json({ error: 'Agent not found' })
 
@@ -47,7 +48,7 @@ router.post('/restore', (req, res) => {
     if (!filename.includes('.jsonl.reset.'))
       return res.status(400).json({ error: 'Not a valid checkpoint file' })
 
-    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
+    const config = readOpenclawConfig()
     const agent = config.agents?.list?.find(a => a.id === agentId)
     if (!agent) return res.status(404).json({ error: 'Agent not found' })
 

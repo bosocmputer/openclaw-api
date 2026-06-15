@@ -1,7 +1,8 @@
 const router = require('express').Router()
 const fs = require('fs')
 const path = require('path')
-const { HOME, CONFIG_PATH } = require('../lib/config')
+const { HOME } = require('../lib/config')
+const { readOpenclawConfig, writeOpenclawConfigAtomic } = require('../lib/openclaw-config')
 
 // ─── Error Alerting Watcher ────────────────────────────────────────────────────
 const alertState = {}
@@ -19,7 +20,7 @@ async function sendTelegramAlert(botToken, chatId, text) {
 
 function runAlertCheck() {
   let config = {}
-  try { config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) } catch { return }
+  try { config = readOpenclawConfig() } catch { return }
   const alertConfig = config.alerting?.telegram
   if (!alertConfig?.enabled || !alertConfig?.chatId) return
 
@@ -116,7 +117,7 @@ function startAlertWatcher() {
 // GET /api/alerting — get alerting config
 router.get('/', (req, res) => {
   try {
-    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
+    const config = readOpenclawConfig()
     res.json(config.alerting || { telegram: { enabled: false, chatId: '' } })
   } catch (e) {
     console.error('[openclaw-api]', req.method, req.path, e.message)
@@ -127,9 +128,9 @@ router.get('/', (req, res) => {
 // PUT /api/alerting — save alerting config
 router.put('/', (req, res) => {
   try {
-    const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'))
+    const config = readOpenclawConfig()
     config.alerting = req.body
-    fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2))
+    writeOpenclawConfigAtomic(config)
     res.json({ ok: true })
   } catch (e) {
     console.error('[openclaw-api]', req.method, req.path, e.message)

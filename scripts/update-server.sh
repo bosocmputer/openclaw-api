@@ -68,6 +68,20 @@ run() {
   fi
 }
 
+find_pm2() {
+  if command -v pm2 >/dev/null 2>&1; then
+    command -v pm2
+    return 0
+  fi
+  for candidate in "$HOME/.npm-global/bin/pm2" "$HOME/.nvm/versions/node"/*/bin/pm2; do
+    if [[ -x "$candidate" ]]; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
 load_api_token() {
   if [[ -n "${API_TOKEN:-}" ]]; then return 0; fi
   if [[ -f "$API_DIR/.env" ]]; then
@@ -104,7 +118,7 @@ preflight() {
   command -v git >/dev/null || { err "git not found"; exit 1; }
   command -v node >/dev/null || { err "node not found"; exit 1; }
   command -v curl >/dev/null || { err "curl not found"; exit 1; }
-  command -v pm2 >/dev/null || warn "pm2 not found in PATH"
+  find_pm2 >/dev/null || warn "pm2 not found"
   command -v docker >/dev/null || warn "docker not found in PATH"
   load_api_token
   [[ -n "${API_TOKEN:-}" ]] && ok "API token found" || warn "API token not found; health/restart checks may fail"
@@ -124,6 +138,10 @@ backup_state() {
   cp "$CONFIG_PATH" "$BACKUP_ROOT/openclaw.json"
   git -C "$API_DIR" rev-parse HEAD > "$BACKUP_ROOT/openclaw-api.head"
   git -C "$ADMIN_DIR" rev-parse HEAD > "$BACKUP_ROOT/openclaw-admin.head"
+  git -C "$API_DIR" status --porcelain > "$BACKUP_ROOT/openclaw-api.status" || true
+  git -C "$ADMIN_DIR" status --porcelain > "$BACKUP_ROOT/openclaw-admin.status" || true
+  git -C "$API_DIR" diff --binary > "$BACKUP_ROOT/openclaw-api.dirty.diff" || true
+  git -C "$ADMIN_DIR" diff --binary > "$BACKUP_ROOT/openclaw-admin.dirty.diff" || true
 
   find "$STATE_DIR/agents" -type f \( -name "auth-profiles.json" -o -name "SOUL.md" \) 2>/dev/null | while read -r file; do
     rel="${file#$HOME/}"
@@ -149,9 +167,15 @@ restore_backup() {
   fi
   if [[ -f "$root/openclaw-api.head" ]]; then
     git -C "$API_DIR" checkout "$(cat "$root/openclaw-api.head")" -- .
+    if [[ -s "$root/openclaw-api.dirty.diff" ]]; then
+      git -C "$API_DIR" apply "$root/openclaw-api.dirty.diff" || warn "Could not re-apply openclaw-api dirty diff"
+    fi
   fi
   if [[ -f "$root/openclaw-admin.head" ]]; then
     git -C "$ADMIN_DIR" checkout "$(cat "$root/openclaw-admin.head")" -- .
+    if [[ -s "$root/openclaw-admin.dirty.diff" ]]; then
+      git -C "$ADMIN_DIR" apply "$root/openclaw-admin.dirty.diff" || warn "Could not re-apply openclaw-admin dirty diff"
+    fi
   fi
   ok "Rollback files restored"
   restart_changed "rollback"
@@ -162,6 +186,16 @@ update_repo() {
   local label="$2"
   local before after
   before="$(git -C "$dir" rev-parse HEAD)"
+  if [[ "$MODE" != "dry-run" ]]; then
+    local dirty_files
+    dirty_files="$(git -C "$dir" diff --name-only || true)"
+    if [[ -n "$dirty_files" ]]; then
+      warn "$label has tracked local edits; backed up dirty diff and cleaning before pull"
+      while IFS= read -r file; do
+        [[ -n "$file" ]] && git -C "$dir" checkout -- "$file"
+      done <<< "$dirty_files"
+    fi
+  fi
   run git -C "$dir" pull --ff-only origin main
   if [[ "$MODE" == "dry-run" ]]; then return 0; fi
   after="$(git -C "$dir" rev-parse HEAD)"
@@ -307,9 +341,11 @@ restart_changed() {
     return 0
   fi
   load_api_token
+  local pm2_bin=""
+  pm2_bin="$(find_pm2 || true)"
   if [[ "$CHANGED_API" -eq 1 || "$CHANGED_STATE" -eq 1 || "$reason" == "rollback" ]]; then
-    if command -v pm2 >/dev/null; then
-      pm2 restart "$PM2_PROCESS"
+    if [[ -n "$pm2_bin" ]]; then
+      "$pm2_bin" restart "$PM2_PROCESS"
       ok "$PM2_PROCESS restarted"
     else
       warn "pm2 not found; API restart skipped"

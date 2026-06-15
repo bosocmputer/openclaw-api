@@ -96,9 +96,11 @@ health_check() {
     err "API_TOKEN not found in env or $API_DIR/.env"
     return 1
   fi
-  curl -fsS "$API_URL/api/system/health?refresh=true" \
-    -H "Authorization: Bearer $API_TOKEN" \
-    | node -e '
+  local response
+  if ! response="$(curl -fsS "$API_URL/api/system/health?refresh=true" -H "Authorization: Bearer $API_TOKEN")"; then
+    return 1
+  fi
+  printf '%s' "$response" | node -e '
       let data = "";
       process.stdin.on("data", d => data += d);
       process.stdin.on("end", () => {
@@ -108,6 +110,20 @@ health_check() {
         if (critical.length) process.exit(3);
       });
     '
+}
+
+wait_for_api() {
+  load_api_token
+  if [[ -z "${API_TOKEN:-}" ]]; then return 1; fi
+  for _ in $(seq 1 30); do
+    if curl -fsS "$API_URL/api/status" -H "Authorization: Bearer $API_TOKEN" >/dev/null 2>&1; then
+      ok "API is ready"
+      return 0
+    fi
+    sleep 1
+  done
+  warn "API did not become ready within 30s"
+  return 1
 }
 
 preflight() {
@@ -347,6 +363,7 @@ restart_changed() {
     if [[ -n "$pm2_bin" ]]; then
       "$pm2_bin" restart "$PM2_PROCESS"
       ok "$PM2_PROCESS restarted"
+      wait_for_api || true
     else
       warn "pm2 not found; API restart skipped"
     fi

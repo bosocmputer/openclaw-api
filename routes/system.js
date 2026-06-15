@@ -1,6 +1,7 @@
 const router = require('express').Router()
 const fs = require('fs')
 const path = require('path')
+const net = require('net')
 const { execFileSync } = require('child_process')
 const { HOME, CONFIG_PATH } = require('../lib/config')
 const { readOpenclawConfig } = require('../lib/openclaw-config')
@@ -95,6 +96,25 @@ async function fetchJson(url, { headers = {}, timeoutMs = EXTERNAL_TIMEOUT_MS } 
   }
 }
 
+function checkTcpPort(port, host = '127.0.0.1', timeoutMs = 700) {
+  return new Promise(resolve => {
+    const socket = net.createConnection({ host, port })
+    const timer = setTimeout(() => {
+      socket.destroy()
+      resolve(false)
+    }, timeoutMs)
+    socket.once('connect', () => {
+      clearTimeout(timer)
+      socket.end()
+      resolve(true)
+    })
+    socket.once('error', () => {
+      clearTimeout(timer)
+      resolve(false)
+    })
+  })
+}
+
 function hasAuthProfile(agentId) {
   const authPath = path.join(HOME, `.openclaw/agents/${agentId}/agent/auth-profiles.json`)
   try {
@@ -173,24 +193,25 @@ async function buildHealth() {
     return finishHealth(checks, agents)
   }
 
+  const hooksPort = config.gateway?.hooksPort || 18789
   const gatewayStart = Date.now()
   try {
-    execFileSync('pgrep', ['-f', 'openclaw-gateway'], { timeout: 700, stdio: 'ignore' })
-    checks.push(makeCheck('gateway.process', 'Gateway process', 'ok', 'critical', 'openclaw-gateway is running', gatewayStart))
+    execFileSync('pgrep', ['-f', 'openclaw.*gateway|openclaw-gateway'], { timeout: 700, stdio: 'ignore' })
+    checks.push(makeCheck('gateway.process', 'Gateway process', 'ok', 'critical', 'OpenClaw gateway process is running', gatewayStart))
   } catch {
+    const portOnline = await checkTcpPort(hooksPort)
     checks.push(makeCheck(
       'gateway.process',
       'Gateway process',
-      'fail',
+      portOnline ? 'ok' : 'fail',
       'critical',
-      'openclaw-gateway process not found',
+      portOnline ? `Gateway hooks port ${hooksPort} is listening` : 'OpenClaw gateway process/port not found',
       gatewayStart,
-      { remediation: 'Run openclaw gateway restart or restart the PM2 managed gateway' }
+      { remediation: portOnline ? undefined : 'Run openclaw gateway restart or restart the PM2 managed gateway' }
     ))
   }
 
   const hooksStart = Date.now()
-  const hooksPort = config.gateway?.hooksPort || 18789
   const hooksOk = Boolean(config.hooks?.enabled !== false && config.hooks?.allowRequestSessionKey !== false)
   checks.push(makeCheck(
     'hooks.config',

@@ -79,6 +79,37 @@ function shouldIncludeMonitorMessage(msg) {
   return true
 }
 
+function extractToolResultText(msg) {
+  const c = msg?.content
+  if (typeof c === 'string') return c
+  if (Array.isArray(c)) {
+    return c.map(item => {
+      if (typeof item === 'string') return item
+      if (typeof item?.text === 'string') return item.text
+      return ''
+    }).join('\n').trim()
+  }
+  return ''
+}
+
+function parseToolNotFound(text) {
+  const value = String(text || '')
+  const match = value.match(/Tool\s+([A-Za-z0-9_.:-]+)\s+not found/i)
+  if (!match) return null
+  return match[1]
+}
+
+function summarizeToolLoopWarnings(toolNotFoundCounts) {
+  return Object.entries(toolNotFoundCounts)
+    .filter(([, count]) => count >= 2)
+    .map(([toolName, count]) => ({
+      type: 'tool_not_found_loop',
+      toolName,
+      count,
+      summary: `Tool ${toolName} not found repeated ${count} times`,
+    }))
+}
+
 // GET /api/monitor/events — real-time session state across all agents and channels
 router.get('/events', async (_req, res) => {
   try {
@@ -270,6 +301,7 @@ router.get('/events', async (_req, res) => {
 
         // Build events array from messages (with latency, token usage, and tool result pairing)
         const events = []
+        const toolNotFoundCounts = {}
         let lastUserTsMs = null
         for (const msg of filtered) {
           const msgTs = msg.timestamp || msg.ts
@@ -333,19 +365,35 @@ router.get('/events', async (_req, res) => {
             }
           } else if (msg.role === 'toolResult') {
             // Pair tool result with last unmatched tool event
-            const c = msg.content
-            if (Array.isArray(c)) {
-              const text = c.find(x => x.type === 'text')?.text || ''
-              if (text) {
-                for (let i = events.length - 1; i >= 0; i--) {
-                  if (events[i].type === 'tool' && events[i].toolResult === undefined) {
-                    events[i].toolResult = text.slice(0, 3000)
-                    break
-                  }
+            const text = extractToolResultText(msg)
+            const missingTool = parseToolNotFound(text)
+            if (missingTool) {
+              toolNotFoundCounts[missingTool] = (toolNotFoundCounts[missingTool] || 0) + 1
+            }
+            if (text) {
+              let paired = false
+              for (let i = events.length - 1; i >= 0; i--) {
+                if (events[i].type === 'tool' && events[i].toolResult === undefined) {
+                  events[i].toolResult = text.slice(0, 3000)
+                  paired = true
+                  break
                 }
+              }
+              if (missingTool && !paired) {
+                events.push({ ts: tsFormatted, type: 'warning', text: `Tool ${missingTool} not found`, toolName: missingTool, toolResult: text.slice(0, 3000) })
               }
             }
           }
+        }
+
+        const toolWarnings = summarizeToolLoopWarnings(toolNotFoundCounts)
+        for (const warning of toolWarnings) {
+          events.push({
+            ts: events.at(-1)?.ts || null,
+            type: 'warning',
+            text: warning.summary,
+            toolName: warning.toolName,
+          })
         }
 
         // Skip stale sessions (no activity in last 3 days)
@@ -367,6 +415,7 @@ router.get('/events', async (_req, res) => {
           cost: Math.round(sessionCost * 100000) / 100000,
           inputTokens: sessionInputTokens,
           outputTokens: sessionOutputTokens,
+          warnings: toolWarnings,
           events
         }
         channels[channel].push(sessionEntry)
@@ -527,6 +576,7 @@ agentSessionsRouter.get('/:id/sessions/:sessionKey(*)', (req, res) => {
       : MAX_SESSION_LINES
     const lines = readTailLines(sessionFile, limit)
     const messages = []
+    const toolNotFoundCounts = {}
     let totalInput = 0, totalOutput = 0, totalCost = 0
     let lastUserTsMs = null
     const latencies = []
@@ -584,8 +634,11 @@ agentSessionsRouter.get('/:id/sessions/:sessionKey(*)', (req, res) => {
             if (textParts.length > 0) lastUserTsMs = null
           }
         } else if (msg.role === 'toolResult') {
-          const c = msg.content
-          const text = Array.isArray(c) ? (c.find(x => x.type === 'text')?.text || '') : ''
+          const text = extractToolResultText(msg)
+          const missingTool = parseToolNotFound(text)
+          if (missingTool) {
+            toolNotFoundCounts[missingTool] = (toolNotFoundCounts[missingTool] || 0) + 1
+          }
           for (let i = messages.length - 1; i >= 0; i--) {
             const prev = messages[i]
             if (prev.role === 'assistant' && prev.toolCalls?.length > 0) {
@@ -604,6 +657,7 @@ agentSessionsRouter.get('/:id/sessions/:sessionKey(*)', (req, res) => {
       sessionId: sessionKey,
       agentId: id,
       messages,
+      warnings: summarizeToolLoopWarnings(toolNotFoundCounts),
       stats: {
         turns: messages.filter(m => m.role === 'user').length,
         inputTokens: totalInput,
@@ -709,5 +763,8 @@ module.exports = {
     isDeliveryMirrorMessage,
     normalizeSessionEntry,
     shouldIncludeMonitorMessage,
+    extractToolResultText,
+    parseToolNotFound,
+    summarizeToolLoopWarnings,
   },
 }

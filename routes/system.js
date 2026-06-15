@@ -5,8 +5,14 @@ const net = require('net')
 const { execFileSync } = require('child_process')
 const { HOME, CONFIG_PATH } = require('../lib/config')
 const { readOpenclawConfig } = require('../lib/openclaw-config')
+const {
+  DEFAULT_MCP_URL,
+  compareSoulContractToTools,
+  getMcpTools,
+  normalizeAccessMode,
+  parseSoulContract,
+} = require('../lib/mcp-tools')
 
-const DEFAULT_MCP_URL = 'http://192.168.2.248:3515/sse'
 const HEALTH_TTL_MS = 30_000
 const EXTERNAL_TIMEOUT_MS = 1800
 let healthCache = null
@@ -62,6 +68,19 @@ function readJsonFile(filePath) {
   return JSON.parse(fs.readFileSync(filePath, 'utf8'))
 }
 
+function readTailLines(filePath, maxLines, maxBytes = 256 * 1024) {
+  const stat = fs.statSync(filePath)
+  const start = Math.max(0, stat.size - maxBytes)
+  const fd = fs.openSync(filePath, 'r')
+  try {
+    const buffer = Buffer.alloc(stat.size - start)
+    fs.readSync(fd, buffer, 0, buffer.length, start)
+    return buffer.toString('utf8').split('\n').filter(Boolean).slice(-maxLines)
+  } finally {
+    fs.closeSync(fd)
+  }
+}
+
 function resolveHome(p) {
   return typeof p === 'string' ? p.replace(/^~/, HOME) : p
 }
@@ -73,13 +92,9 @@ function getAgentMcp(config, agentId) {
   return {
     name: servers[agentId] ? agentId : `sml-${agentId}`,
     url: server.url || DEFAULT_MCP_URL,
-    accessMode: server.headers?.['mcp-access-mode'] || server.env?.MCP_ACCESS_MODE || agentId || 'general',
+    accessMode: normalizeAccessMode(server.headers?.['mcp-access-mode'] || server.env?.MCP_ACCESS_MODE || agentId || 'general'),
     legacyName: Boolean(servers[`sml-${agentId}`] && !servers[agentId]),
   }
-}
-
-function mcpToolsUrl(mcpUrl) {
-  return String(mcpUrl || DEFAULT_MCP_URL).replace(/\/(call|sse|mcp)(\/.*)?$/, '') + '/tools'
 }
 
 async function fetchJson(url, { headers = {}, timeoutMs = EXTERNAL_TIMEOUT_MS } = {}) {
@@ -126,7 +141,7 @@ function hasAuthProfile(agentId) {
   }
 }
 
-function soulStatus(agent) {
+function soulStatus(agent, tools = []) {
   const workspace = resolveHome(agent.workspace)
   const soulPath = path.join(workspace, 'SOUL.md')
   try {
@@ -137,15 +152,18 @@ function soulStatus(agent) {
       { label: 'exec tool', re: /exec\s+tool/i },
       { label: 'mcporter', re: /mcporter/i },
     ].filter(p => p.re.test(soul)).map(p => p.label)
+    const contract = parseSoulContract(soul)
+    const contractStatus = compareSoulContractToTools(contract, tools)
+    const warnings = [...legacyPatterns.map(p => `legacy pattern: ${p}`), ...contractStatus.warnings]
     return {
-      status: legacyPatterns.length ? 'warn' : 'ok',
+      status: warnings.length ? 'warn' : 'ok',
       legacyPatterns,
-      summary: legacyPatterns.length
-        ? `legacy patterns: ${legacyPatterns.join(', ')}`
-        : 'SOUL hygiene ok',
+      contract,
+      contractWarnings: contractStatus.warnings,
+      summary: warnings.length ? warnings.join('; ') : 'SOUL contract matches MCP tools',
     }
   } catch {
-    return { status: 'fail', legacyPatterns: [], summary: 'SOUL.md not found' }
+    return { status: 'fail', legacyPatterns: [], contractWarnings: [], summary: 'SOUL.md not found' }
   }
 }
 
@@ -159,6 +177,45 @@ function telegramAccounts(config) {
     accounts.push({ id: 'default', token: tg.botToken })
   }
   return accounts
+}
+
+function recentToolLoopWarnings(config) {
+  const warnings = []
+  for (const agent of config.agents?.list || []) {
+    const sessionsPath = path.join(HOME, `.openclaw/agents/${agent.id}/sessions/sessions.json`)
+    let sessions = {}
+    try { sessions = JSON.parse(fs.readFileSync(sessionsPath, 'utf8')) } catch { continue }
+
+    for (const [sessionKey, info] of Object.entries(sessions).slice(-80)) {
+      if (!info || sessionKey.includes(':main')) continue
+      const sessionFile = info.sessionFile
+        || (info.sessionId ? path.join(HOME, `.openclaw/agents/${agent.id}/sessions/${info.sessionId}.jsonl`) : null)
+      if (!sessionFile || !fs.existsSync(sessionFile)) continue
+
+      const counts = {}
+      try {
+        for (const line of readTailLines(sessionFile, 220)) {
+          let entry = null
+          try { entry = JSON.parse(line) } catch { continue }
+          const msg = entry.message || entry
+          if (msg.role !== 'toolResult') continue
+          const content = Array.isArray(msg.content)
+            ? msg.content.map(x => x?.text || '').join('\n')
+            : String(msg.content || '')
+          const match = content.match(/Tool\s+([A-Za-z0-9_.:-]+)\s+not found/i)
+          if (match) counts[match[1]] = (counts[match[1]] || 0) + 1
+        }
+      } catch { continue }
+
+      for (const [toolName, count] of Object.entries(counts)) {
+        if (count >= 2) {
+          warnings.push({ agentId: agent.id, sessionKey, toolName, count })
+          if (warnings.length >= 20) return warnings
+        }
+      }
+    }
+  }
+  return warnings
 }
 
 async function buildHealth() {
@@ -252,26 +309,30 @@ async function buildHealth() {
   const list = config.agents?.list || []
   await Promise.all(list.map(async (agent) => {
     const mcp = getAgentMcp(config, agent.id)
-    const soul = soulStatus(agent)
     const auth = hasAuthProfile(agent.id)
     let toolCount = 0
     let mcpStatus = 'warn'
     let mcpSummary = 'No MCP server configured'
+    let tools = []
+    let toolSource = 'none'
+    let mcpWarnings = []
     const mcpStart = Date.now()
 
     if (mcp?.url) {
-      try {
-        const result = await fetchJson(mcpToolsUrl(mcp.url), {
-          headers: { 'mcp-access-mode': mcp.accessMode },
-        })
-        const tools = Array.isArray(result.json) ? result.json : (result.json?.tools || [])
-        toolCount = Array.isArray(tools) ? tools.length : 0
-        mcpStatus = result.ok ? 'ok' : 'fail'
-        mcpSummary = result.ok ? `${toolCount} tools available` : `HTTP ${result.status} from MCP tools`
-      } catch (e) {
-        mcpStatus = 'fail'
-        mcpSummary = sanitizeError(e)
-      }
+      const result = await getMcpTools({
+        mcpUrl: mcp.url,
+        accessMode: mcp.accessMode,
+        refresh: true,
+        timeoutMs: EXTERNAL_TIMEOUT_MS,
+      })
+      tools = result.tools || []
+      toolCount = tools.length
+      toolSource = result.toolSource
+      mcpWarnings = result.warnings || []
+      mcpStatus = result.toolSource === 'live' ? 'ok' : 'fail'
+      mcpSummary = result.toolSource === 'live'
+        ? `${toolCount} tools available`
+        : `MCP /tools unavailable, using fallback snapshot (${toolCount} tools)`
     }
 
     checks.push(makeCheck(
@@ -281,9 +342,14 @@ async function buildHealth() {
       'critical',
       mcpSummary,
       mcpStart,
-      { remediation: mcpStatus === 'ok' ? undefined : 'Register MCP through openclaw mcp add with the configured MCP URL' }
+      {
+        remediation: mcpStatus === 'ok' ? undefined : 'Register MCP through openclaw mcp add with the configured MCP URL',
+        toolSource,
+        warnings: mcpWarnings,
+      }
     ))
 
+    const soul = soulStatus(agent, tools)
     const soulCheckStart = Date.now()
     checks.push(makeCheck(
       `soul.${agent.id}`,
@@ -292,7 +358,12 @@ async function buildHealth() {
       'warn',
       soul.summary,
       soulCheckStart,
-      { remediation: soul.status === 'ok' ? undefined : 'Load the native MCP SOUL template and remove curl, /call, exec tool, and mcporter instructions' }
+      {
+        remediation: soul.status === 'ok' ? undefined : 'Load the capability SOUL template, verify live MCP tools, then reset active sessions',
+        legacyPatterns: soul.legacyPatterns,
+        contractWarnings: soul.contractWarnings,
+        allowedToolsHash: soul.contract?.allowedToolsHash,
+      }
     ))
 
     const authStart = Date.now()
@@ -311,6 +382,7 @@ async function buildHealth() {
       accessMode: mcp?.accessMode || agent.id || 'general',
       mcpUrl: mcp?.url || DEFAULT_MCP_URL,
       toolCount,
+      toolSource,
       soulStatus: soul.status,
       authStatus: auth.ok ? 'ok' : 'warn',
     })
@@ -421,6 +493,7 @@ router.get('/support-bundle', async (req, res) => {
       generatedAt: nowIso(),
       durationMs: durationSince(startedAt),
       health,
+      recentToolLoopWarnings: recentToolLoopWarnings(readOpenclawConfig()),
       repos,
       processStatus,
       runtime: {

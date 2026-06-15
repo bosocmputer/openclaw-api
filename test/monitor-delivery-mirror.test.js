@@ -43,3 +43,12 @@ test('wrapped session entries preserve provider and model metadata', () => {
   assert.equal(_internal.shouldIncludeMonitorMessage(normalized), false)
 })
 
+test('tool not found loops are summarized without full session logs', () => {
+  const toolName = _internal.parseToolNotFound('Tool stock__get_product_price not found')
+  const warnings = _internal.summarizeToolLoopWarnings({ [toolName]: 5, other_tool: 1 })
+
+  assert.equal(toolName, 'stock__get_product_price')
+  assert.equal(warnings.length, 1)
+  assert.equal(warnings[0].toolName, 'stock__get_product_price')
+  assert.equal(warnings[0].count, 5)
+})

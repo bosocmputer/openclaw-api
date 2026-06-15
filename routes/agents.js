@@ -5,9 +5,7 @@ const { HOME } = require('../lib/config')
 const { readOpenclawConfig, writeOpenclawConfigAtomic } = require('../lib/openclaw-config')
 const { readUserNames, writeUserNames } = require('../lib/files')
 const { generateSoulTemplate } = require('../lib/soul-template')
-
-const MCP_TOOL_CACHE_TTL_MS = 30_000
-const mcpToolCache = new Map()
+const { getMcpTools } = require('../lib/mcp-tools')
 
 // ─── openclaw mcp helpers — ใช้ openclaw.json mcp.servers โดยตรง ───────────────
 function _readOcJson() {
@@ -67,7 +65,7 @@ router.get('/', (req, res) => {
 })
 
 // POST /api/agents — เพิ่ม agent ใหม่
-router.post('/', (req, res) => {
+router.post('/', async (req, res) => {
   try {
     const { id, workspace, accessMode = 'general' } = req.body
     if (!id || !workspace) return res.status(400).json({ error: 'id and workspace required' })
@@ -83,7 +81,8 @@ router.post('/', (req, res) => {
       ? workspace.replace(HOME, '~')
       : workspace
     // ไม่สร้าง mcporter.json อีกต่อไป — ใช้ openclaw mcp ผ่าน UI แทน
-    const soul = generateSoulTemplate(workspaceTilde, accessMode, null)
+    const toolResult = await getMcpTools({ accessMode, mcpUrl: null })
+    const soul = generateSoulTemplate(workspaceTilde, accessMode, null, 'professional', toolResult)
     fs.writeFileSync(path.join(workspacePath, 'SOUL.md'), soul)
     writeOpenclawConfigAtomic(config, { reason: 'agent-create' })
     res.json({ ok: true })
@@ -94,21 +93,36 @@ router.post('/', (req, res) => {
 })
 
 // GET /api/agents/:id/soul/template — ดึง SOUL template ตาม access mode ปัจจุบัน
-router.get('/:id/soul/template', (req, res) => {
+router.get('/:id/soul/template', async (req, res) => {
   try {
     const config = readOpenclawConfig()
     const agent = config.agents?.list?.find(a => a.id === req.params.id)
     if (!agent) return res.status(404).json({ error: 'Agent not found' })
     // อ่าน accessMode จาก openclaw.json mcp.servers
     const ocServer = _getOcServer(req.params.id)
-    const accessMode = ocServer?.headers?.['mcp-access-mode'] ?? 'general'
+    const requestedAccessMode = ocServer?.headers?.['mcp-access-mode'] ?? 'general'
     const mcpUrl = ocServer?.url ?? null
     const workspaceTilde = agent.workspace.startsWith(HOME)
       ? agent.workspace.replace(HOME, '~')
       : agent.workspace
     const persona = req.query.persona || 'professional'
-    const soul = generateSoulTemplate(workspaceTilde, accessMode, mcpUrl, persona)
-    res.json({ soul, accessMode, persona })
+    const refreshTools = req.query.refreshTools === 'true'
+    const toolResult = await getMcpTools({ accessMode: requestedAccessMode, mcpUrl, refresh: refreshTools })
+    const accessMode = toolResult.accessMode
+    const soul = generateSoulTemplate(workspaceTilde, accessMode, mcpUrl, persona, toolResult)
+    res.json({
+      soul,
+      accessMode,
+      persona,
+      mcpUrl,
+      toolSource: toolResult.toolSource,
+      tools: toolResult.tools,
+      capabilities: toolResult.capabilities,
+      deniedCapabilities: toolResult.deniedCapabilities,
+      warnings: toolResult.warnings,
+      generatedAt: toolResult.generatedAt,
+      cache: toolResult.cache,
+    })
   } catch (e) {
     console.error('[openclaw-api]', req.method, req.path, e.message)
     res.status(500).json({ error: 'Internal server error' })
@@ -170,6 +184,47 @@ router.put('/:id/soul', (req, res) => {
   }
 })
 
+// POST /api/agents/:id/sessions/reset-active — ลบ session key ที่ active ของ agent นี้
+router.post('/:id/sessions/reset-active', (req, res) => {
+  try {
+    const config = readOpenclawConfig()
+    const agent = config.agents?.list?.find(a => a.id === req.params.id)
+    if (!agent) return res.status(404).json({ error: 'Agent not found' })
+
+    const sessionsPath = path.join(HOME, `.openclaw/agents/${req.params.id}/sessions/sessions.json`)
+    if (!fs.existsSync(sessionsPath)) {
+      return res.json({ ok: true, removed: 0, backupPath: null })
+    }
+
+    const sessions = JSON.parse(fs.readFileSync(sessionsPath, 'utf8'))
+    const stamp = new Date().toISOString().replace(/[-:T.Z]/g, '').slice(0, 14)
+    const backupPath = `${sessionsPath}.bak.${stamp}`
+    const keys = Object.keys(sessions)
+    const removedKeys = keys.filter(key => !key.endsWith(':main'))
+    if (removedKeys.length === 0) {
+      return res.json({ ok: true, removed: 0, backupPath: null })
+    }
+
+    fs.copyFileSync(sessionsPath, backupPath)
+    for (const key of removedKeys) delete sessions[key]
+    const serialized = JSON.stringify(sessions, null, 2)
+    JSON.parse(serialized)
+    const tmpPath = `${sessionsPath}.tmp.${process.pid}.${Date.now()}`
+    const fd = fs.openSync(tmpPath, 'w', 0o600)
+    try {
+      fs.writeFileSync(fd, serialized)
+      fs.fsyncSync(fd)
+    } finally {
+      fs.closeSync(fd)
+    }
+    fs.renameSync(tmpPath, sessionsPath)
+    res.json({ ok: true, removed: removedKeys.length, backupPath, reason: req.body?.reason || 'manual-reset' })
+  } catch (e) {
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
 // GET /api/agents/:id/mcp — อ่านจาก openclaw.json mcp.servers
 router.get('/:id/mcp', (req, res) => {
   try {
@@ -211,7 +266,7 @@ router.put('/:id/mcp', (req, res) => {
 
 // POST /api/agents/:id/mcp/test — ทดสอบ MCP จาก openclaw.json mcp.servers
 // body: { accessMode?: string } — override ถ้าต้องการ
-router.post('/:id/mcp/test', (req, res) => {
+router.post('/:id/mcp/test', async (req, res) => {
   try {
     const config = readOpenclawConfig()
     if (!config.agents?.list?.find(a => a.id === req.params.id))
@@ -220,27 +275,30 @@ router.post('/:id/mcp/test', (req, res) => {
     if (!ocServer?.url) return res.status(400).json({ error: 'No MCP server configured — save config first' })
     const name = _mcpServerName(req.params.id)
     const effectiveMode = req.body?.accessMode ?? ocServer.headers?.['mcp-access-mode'] ?? 'general'
-    const baseUrl = ocServer.url.replace(/\/(call|sse|mcp)(\/.*)?$/, '')
-    const cacheKey = `${baseUrl}|${effectiveMode}`
-    const cached = mcpToolCache.get(cacheKey)
-    if (cached && Date.now() - cached.createdAt < MCP_TOOL_CACHE_TTL_MS) {
-      return res.json({ ...cached.payload, cache: { hit: true, ttlSeconds: Math.ceil((MCP_TOOL_CACHE_TTL_MS - (Date.now() - cached.createdAt)) / 1000) } })
-    }
-    fetch(baseUrl + '/tools', {
-      headers: { 'mcp-access-mode': effectiveMode },
-      signal: AbortSignal.timeout(2500),
-    })
-      .then(r => r.json())
-      .then(data => {
-        const list = Array.isArray(data) ? data : (data.tools ?? [])
-        const payload = {
-          ok: true, serverName: name, accessMode: effectiveMode,
-          tools: list.map(t => ({ name: t.name, description: t.description ?? '' }))
-        }
-        mcpToolCache.set(cacheKey, { createdAt: Date.now(), payload })
-        res.json({ ...payload, cache: { hit: false, ttlSeconds: MCP_TOOL_CACHE_TTL_MS / 1000 } })
+    const result = await getMcpTools({ mcpUrl: ocServer.url, accessMode: effectiveMode, refresh: req.body?.refreshTools === true })
+    if (result.toolSource !== 'live') {
+      return res.status(502).json({
+        ok: false,
+        serverName: name,
+        accessMode: result.accessMode,
+        error: result.error || 'MCP unavailable',
+        tools: result.tools,
+        toolSource: result.toolSource,
+        warnings: result.warnings,
+        cache: result.cache,
       })
-      .catch(err => res.status(500).json({ error: err.message }))
+    }
+    res.json({
+      ok: true,
+      serverName: name,
+      accessMode: result.accessMode,
+      tools: result.tools,
+      capabilities: result.capabilities,
+      deniedCapabilities: result.deniedCapabilities,
+      toolSource: result.toolSource,
+      warnings: result.warnings,
+      cache: result.cache,
+    })
   } catch (e) {
     console.error('[openclaw-api]', req.method, req.path, e.message)
     res.status(500).json({ error: 'Internal server error' })

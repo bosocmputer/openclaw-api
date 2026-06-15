@@ -251,13 +251,24 @@ const fs = require('fs')
 const [configPath, mcpUrl] = process.argv.slice(2)
 const config = JSON.parse(fs.readFileSync(configPath, 'utf8'))
 const agents = config.agents?.list || []
+const validModes = new Set(['admin', 'sales', 'purchase', 'stock', 'general'])
+function defaultAccessMode(id) {
+  const value = String(id || '').toLowerCase()
+  if (validModes.has(value)) return value
+  if (value === 'sale' || value.includes('sale')) return 'sales'
+  if (value.includes('purchase') || value.includes('buy')) return 'purchase'
+  if (value.includes('stock') || value.includes('warehouse')) return 'stock'
+  if (value.includes('admin')) return 'admin'
+  return 'general'
+}
 config.mcp ??= {}
 config.mcp.servers ??= {}
 for (const agent of agents) {
   const id = agent.id
   const legacy = config.mcp.servers[`sml-${id}`]
   const current = config.mcp.servers[id] || legacy || {}
-  const accessMode = current.headers?.['mcp-access-mode'] || current.env?.MCP_ACCESS_MODE || id
+  const configuredMode = current.headers?.['mcp-access-mode'] || current.env?.MCP_ACCESS_MODE
+  const accessMode = validModes.has(configuredMode) ? configuredMode : defaultAccessMode(id)
   config.mcp.servers[id] = {
     url: current.url || mcpUrl,
     transport: (current.url || mcpUrl).includes('/sse') ? 'sse' : 'streamable-http',

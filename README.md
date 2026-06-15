@@ -142,7 +142,7 @@ openclaw-api/
 | DELETE | `/api/agents/:id` | ลบ agent |
 | GET | `/api/agents/:id/soul` | อ่าน SOUL.md |
 | PUT | `/api/agents/:id/soul` | เขียน SOUL.md |
-| GET | `/api/agents/:id/soul/template` | ดึง SOUL template ตาม access mode + persona |
+| GET | `/api/agents/:id/soul/template` | ดึง SOUL template ตาม access mode + persona + live MCP capability contract |
 | GET | `/api/agents/:id/mcp` | อ่าน openclaw.json `mcp.servers` |
 | PUT | `/api/agents/:id/mcp` | เขียน openclaw.json `mcp.servers` |
 | POST | `/api/agents/:id/mcp/test` | test MCP access (cached tool list, header `mcp-access-mode`) |
@@ -267,7 +267,7 @@ openclaw-api/
 | GET | `/api/memory/:agentId/dreams` | เนื้อหา dreams.md เต็มของ agent |
 | GET | `/api/memory/:agentId/daily/:filename` | เนื้อหา daily memory file เช่น `2026-04-07-session.md` |
 
-> `memory/*.md` อยู่ที่ `~/.openclaw/workspace-<agentId>/memory/` — ระบบหลักที่ AI ใช้งานจริง
+> `memory/*.md` อยู่ที่ `~/.openclaw/workspace-<agentId>/memory/` — เป็นสถานะ memory เดิม/เสริม ไม่ใช่สิทธิ์ tool หรือ source of truth ของ SOUL template
 >
 > `MEMORY.md` อยู่ที่ `~/.openclaw/workspace-<agentId>/MEMORY.md` — main session เท่านั้น
 >
@@ -307,8 +307,8 @@ Authorization: Bearer <API_TOKEN>
 - **Webchat session key format** — `agent:{agentId}:hook:webchat:uid:{username}` — prefix `uid:` ป้องกัน conflict กับ LINE accountId
 - **Webchat → LINE bug** — ถ้า `agent:<id>:main` session มี `lastChannel=line` ค้างอยู่ gateway จะ reply ออก LINE แทน webchat — ดูวิธีแก้ใน INSTALL.md
 - **PostgreSQL constraint** — `admin_users_role_check` รองรับ role: `superadmin`, `admin`, `chat`
-- **SOUL.md template** — AI ใช้ native MCP tools ที่ register ใน `openclaw.json mcp.servers`; template ไม่สั่ง `curl`, `/call`, `exec tool`, หรือ `mcporter`; ทุก template มี `## ความจำระหว่าง Session` ให้ AI บันทึกชื่อ user ลง `memory/YYYY-MM-DD.md` ทันที
-- **`/api/memory/status`** — คืน `dailyMemory` field พร้อม `fileCount`, `totalChars`, `latestDate`, `files[]` — สะท้อน `memory/*.md` จริงที่ AI สร้างขึ้น
+- **SOUL.md template** — AI ใช้ native MCP tools ที่ register ใน `openclaw.json mcp.servers`; template สร้างจาก live MCP `/tools` ตาม `mcp-access-mode` พร้อม `OPENCLAW_SOUL_CONTRACT`; template ไม่สั่ง `curl`, `/call`, `exec tool`, `mcporter`, หรือ memory/write-tool block
+- **`/api/memory/status`** — คืน `dailyMemory` field พร้อม `fileCount`, `totalChars`, `latestDate`, `files[]` — ใช้ดูไฟล์ memory เดิม/เสริม ไม่ใช่ contract สิทธิ์ MCP
 - **`/api/monitor/events`** — อ่าน `.jsonl` files last 50 lines ต่อ session, `ts` field = UTC (ต้อง +7h บน client เพื่อแสดงเวลาไทย)
 - **LINE webhookPath ต้องไม่ซ้ำกัน** — ถ้า 2 OA ใช้ path เดียวกัน OA แรกได้ 401
 - **LINE dmPolicy** — ใช้ `"open"` เสมอ — pairing ถูกลบออกแล้ว

@@ -81,3 +81,64 @@ test('model timeout warnings are classified without leaking long payloads', () =
   assert.equal(warning.summary, 'Model/provider timeout or finish_reason error')
   assert.ok(warning.detail.length <= 500)
 })
+
+test('usage metrics normalize provider token and cost shapes', () => {
+  assert.deepEqual(
+    _internal.normalizeUsageMetrics({
+      inputTokens: 1200,
+      outputTokens: 34,
+      cost: 0.00123,
+    }),
+    { input: 1200, output: 34, totalTokens: 1234, cost: 0.00123 }
+  )
+
+  assert.deepEqual(
+    _internal.normalizeUsageMetrics({
+      prompt_tokens: 2000,
+      completion_tokens: 50,
+      total_tokens: 2050,
+      cost: { total: 0.0042 },
+    }),
+    { input: 2000, output: 50, totalTokens: 2050, cost: 0.0042 }
+  )
+
+  assert.deepEqual(
+    _internal.normalizeUsageMetrics({
+      input: 1000000,
+      output: 1000000,
+    }),
+    { input: 1000000, output: 1000000, totalTokens: 2000000, cost: 18 }
+  )
+
+  assert.equal(_internal.normalizeUsageMetrics({ input: 0, output: 0, total: 0 }), null)
+})
+
+test('trajectory snapshots normalize to session messages with usage', () => {
+  const messages = _internal.normalizeTrajectoryEntries([
+    {
+      type: 'model.completed',
+      data: {
+        messagesSnapshot: [
+          { role: 'user', content: 'สวัสดี', timestamp: 1781595321000 },
+          {
+            role: 'assistant',
+            content: [{ type: 'text', text: 'สวัสดีครับ' }],
+            timestamp: 1781595324858,
+            usage: {
+              input: 1234,
+              output: 56,
+              cost: { total: 0.0007 },
+            },
+          },
+        ],
+      },
+    },
+  ])
+
+  assert.equal(messages.length, 2)
+  assert.equal(messages[0].timestamp, '2026-06-16T07:35:21.000Z')
+  assert.deepEqual(
+    _internal.normalizeUsageMetrics(messages[1].usage),
+    { input: 1234, output: 56, totalTokens: 1290, cost: 0.0007 }
+  )
+})

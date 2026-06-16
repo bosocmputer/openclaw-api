@@ -134,6 +134,95 @@ function safeSnippet(value, max = MAX_CONVERSATION_TEXT) {
   return String(value || '').replace(/\s+/g, ' ').trim().slice(0, max)
 }
 
+function firstFiniteNumber(...values) {
+  for (const value of values) {
+    if (typeof value === 'number' && Number.isFinite(value)) return value
+    if (typeof value === 'string' && value.trim() !== '') {
+      const parsed = Number(value)
+      if (Number.isFinite(parsed)) return parsed
+    }
+  }
+  return undefined
+}
+
+function normalizeUsageMetrics(usage) {
+  if (!usage || typeof usage !== 'object') return null
+  const cost = usage.cost
+  const input = firstFiniteNumber(
+    usage.input,
+    usage.input_tokens,
+    usage.inputTokens,
+    usage.prompt_tokens,
+    usage.promptTokens,
+  ) ?? 0
+  const output = firstFiniteNumber(
+    usage.output,
+    usage.output_tokens,
+    usage.outputTokens,
+    usage.completion_tokens,
+    usage.completionTokens,
+  ) ?? 0
+  const totalTokens = firstFiniteNumber(
+    usage.total,
+    usage.total_tokens,
+    usage.totalTokens,
+  ) ?? input + output
+  const explicitCost = firstFiniteNumber(
+    typeof cost === 'number' ? cost : undefined,
+    cost && typeof cost === 'object' ? cost.total : undefined,
+    usage.totalCost,
+    usage.total_cost,
+    usage.costUsd,
+    usage.estimatedCostUsd,
+  )
+  const estimatedCost = input > 0 || output > 0
+    ? ((input / 1000000) * 3 + (output / 1000000) * 15)
+    : 0
+  const totalCost = explicitCost ?? estimatedCost
+  if (input === 0 && output === 0 && totalTokens === 0 && totalCost === 0) return null
+  return { input, output, totalTokens, cost: totalCost }
+}
+
+function resolveSessionArtifact(agentId, sessionId, explicitFile) {
+  if (!sessionId && !explicitFile) return null
+  const sessionFile = explicitFile
+    || path.join(HOME, `.openclaw/agents/${agentId}/sessions/${sessionId}.jsonl`)
+  if (sessionFile && fs.existsSync(sessionFile)) return { file: sessionFile, kind: 'session' }
+
+  const trajectoryFile = sessionFile
+    ? sessionFile.replace(/\.jsonl$/i, '.trajectory.jsonl')
+    : path.join(HOME, `.openclaw/agents/${agentId}/sessions/${sessionId}.trajectory.jsonl`)
+  if (trajectoryFile && fs.existsSync(trajectoryFile)) return { file: trajectoryFile, kind: 'trajectory' }
+  return null
+}
+
+function resolveMonitorSessionSource(agentId, sessionInfo) {
+  const primary = resolveSessionArtifact(agentId, sessionInfo?.sessionId, sessionInfo?.sessionFile)
+  if (primary) return primary
+  const familyIds = Array.isArray(sessionInfo?.usageFamilySessionIds)
+    ? sessionInfo.usageFamilySessionIds
+    : []
+  for (const sessionId of familyIds.slice().reverse()) {
+    if (!sessionId || sessionId === sessionInfo?.sessionId) continue
+    const candidate = resolveSessionArtifact(agentId, sessionId)
+    if (candidate) return candidate
+  }
+  return null
+}
+
+function normalizeTrajectoryEntries(entries) {
+  const snapshots = entries
+    .filter(entry => (entry?.type === 'model.completed' || entry?.type === 'trace.artifacts') && Array.isArray(entry?.data?.messagesSnapshot))
+  const latest = snapshots.at(-1)
+  if (!latest) return []
+  return latest.data.messagesSnapshot.map(msg => {
+    const timestamp = typeof msg.timestamp === 'number'
+      ? new Date(msg.timestamp < 1000000000000 ? msg.timestamp * 1000 : msg.timestamp).toISOString()
+      : msg.timestamp
+    return { ...msg, timestamp }
+  })
+}
+
 function readSessionText(msg) {
   return safeSnippet(stripGatewayMetadata(extractMessageText(msg)))
 }
@@ -782,16 +871,19 @@ router.get('/events', async (req, res) => {
         }
 
         if (!sessionInfo) continue
-        // sessionFile may be absent for webchat sessions — derive from sessionId
-        const sessionFile = sessionInfo.sessionFile
-          || (sessionInfo.sessionId ? path.join(HOME, `.openclaw/agents/${agentId}/sessions/${sessionInfo.sessionId}.jsonl`) : null)
-        if (!sessionFile) continue
+        // sessionFile may be absent after native resets; fall back to the latest
+        // usage-family session or trajectory so model token/cost remains visible in Monitor.
+        const sessionSource = resolveMonitorSessionSource(agentId, sessionInfo)
+        if (!sessionSource) continue
         if (!channels[channel]) channels[channel] = []
 
         // Read a bounded tail window of the .jsonl file.
         let lines = []
         try {
-          lines = readTailLines(sessionFile, MAX_EVENTS_LINES)
+          const maxLines = sessionSource.kind === 'trajectory'
+            ? Math.max(MAX_EVENTS_LINES, MAX_CONVERSATION_LINES)
+            : MAX_EVENTS_LINES
+          lines = readTailLines(sessionSource.file, maxLines)
         } catch { continue }
 
         // Parse JSONL events
@@ -800,8 +892,10 @@ router.get('/events', async (req, res) => {
           try { parsedLines.push(JSON.parse(line)) } catch { /* skip */ }
         }
 
-        // Normalize: jsonl entries may be {role,content,timestamp} or {type,timestamp,message:{role,content}}
-        const normalized = parsedLines.map(normalizeSessionEntry).filter(Boolean)
+        // Normalize: jsonl entries may be regular session messages or trajectory snapshots.
+        const normalized = sessionSource.kind === 'trajectory'
+          ? normalizeTrajectoryEntries(parsedLines)
+          : parsedLines.map(normalizeSessionEntry).filter(Boolean)
 
         // Filter out heartbeat noise and delivery receipts mirrored after Telegram sends.
         const filtered = normalized.filter(shouldIncludeMonitorMessage)
@@ -876,13 +970,11 @@ router.get('/events', async (req, res) => {
         let sessionInputTokens = 0
         let sessionOutputTokens = 0
         for (const msg of filtered) {
-          if (msg.usage) {
-            const u = msg.usage
-            const inp = u.input || u.input_tokens || 0
-            const out = u.output || u.output_tokens || 0
-            sessionInputTokens += inp
-            sessionOutputTokens += out
-            sessionCost += u.cost?.total ? u.cost.total : ((inp / 1000000) * 3 + (out / 1000000) * 15)
+          const usageMetrics = normalizeUsageMetrics(msg.usage)
+          if (usageMetrics) {
+            sessionInputTokens += usageMetrics.input
+            sessionOutputTokens += usageMetrics.output
+            sessionCost += usageMetrics.cost
           }
           // Count today's messages
           const ts = msg.timestamp || msg.ts
@@ -938,20 +1030,30 @@ router.get('/events', async (req, res) => {
                 detail: modelError.detail,
               })
             }
+            const usageMetricsForMessage = normalizeUsageMetrics(usage)
+            let usageAttachedToMessage = false
+            const attachUsageToEvent = (ev) => {
+              if (!usageMetricsForMessage || usageAttachedToMessage) return ev
+              ev.inputTokens = usageMetricsForMessage.input
+              ev.outputTokens = usageMetricsForMessage.output
+              ev.cost = usageMetricsForMessage.cost
+              usageAttachedToMessage = true
+              return ev
+            }
             const c = msg.content
             if (Array.isArray(c)) {
               for (const item of c) {
                 if (item.type === 'thinking') {
-                  events.push({ ts: tsFormatted, type: 'thinking', text: (item.thinking || '') })
+                  events.push(attachUsageToEvent({ ts: tsFormatted, type: 'thinking', text: (item.thinking || '') }))
                 } else if (item.type === 'tool_use' || item.type === 'toolCall') {
                   const toolName = item.name || ''
                   if (toolName) toolChain.push(toolName)
                   const toolText = toolName + (item.input ? ': ' + JSON.stringify(item.input, null, 2) : '')
-                  events.push({ ts: tsFormatted, type: 'tool', text: toolText, toolName })
+                  events.push(attachUsageToEvent({ ts: tsFormatted, type: 'tool', text: toolText, toolName }))
                 } else if (item.type === 'text' && item.text) {
                   const lower = item.text.toLowerCase()
                   if (lower.includes('bash') || lower.includes('exec')) {
-                    events.push({ ts: tsFormatted, type: 'tool', text: item.text })
+                    events.push(attachUsageToEvent({ ts: tsFormatted, type: 'tool', text: item.text }))
                   } else {
                     const quality = detectReplyQualityWarnings(item.text)
                     for (const warning of quality) {
@@ -969,11 +1071,7 @@ router.get('/events', async (req, res) => {
                       const diff = (new Date(msgTs).getTime() - lastUserTsMs) / 1000
                       if (diff > 0 && diff < 3600) ev.latency = Math.round(diff * 10) / 10
                     }
-                    if (usage) {
-                      ev.inputTokens = usage.input || usage.input_tokens || 0
-                      ev.outputTokens = usage.output || usage.output_tokens || 0
-                      ev.cost = usage.cost?.total ?? 0
-                    }
+                    attachUsageToEvent(ev)
                     events.push(ev)
                     lastUserTsMs = null
                   }
@@ -998,11 +1096,7 @@ router.get('/events', async (req, res) => {
                 const diff = (new Date(msgTs).getTime() - lastUserTsMs) / 1000
                 if (diff > 0 && diff < 3600) ev.latency = Math.round(diff * 10) / 10
               }
-              if (usage) {
-                ev.inputTokens = usage.input || usage.input_tokens || 0
-                ev.outputTokens = usage.output || usage.output_tokens || 0
-                ev.cost = usage.cost?.total ?? 0
-              }
+              attachUsageToEvent(ev)
               events.push(ev)
               lastUserTsMs = null
             }
@@ -1163,10 +1257,10 @@ agentSessionsRouter.get('/:id/sessions', (req, res) => {
           try {
             const entry = JSON.parse(line)
             if (isDeliveryMirrorMessage(entry.message)) continue
-            const usage = entry.message?.usage ?? entry.usage
-            if (usage) {
-              inputTokens += usage.input || usage.input_tokens || 0
-              outputTokens += usage.output || usage.output_tokens || 0
+            const usageMetrics = normalizeUsageMetrics(entry.message?.usage ?? entry.usage)
+            if (usageMetrics) {
+              inputTokens += usageMetrics.input
+              outputTokens += usageMetrics.output
             }
           } catch {}
         }
@@ -1243,7 +1337,7 @@ agentSessionsRouter.get('/:id/sessions/:sessionKey(*)', (req, res) => {
         if (entry.type !== 'message' || !entry.message) continue
         const msg = entry.message
         if (isDeliveryMirrorMessage(msg)) continue
-        const usage = msg.usage ?? entry.usage
+        const usageMetrics = normalizeUsageMetrics(msg.usage ?? entry.usage)
         const ts = entry.timestamp
 
         if (msg.role === 'user') {
@@ -1265,10 +1359,10 @@ agentSessionsRouter.get('/:id/sessions/:sessionKey(*)', (req, res) => {
             if (diff > 0 && diff < 3600) { latency = Math.round(diff * 10) / 10; latencies.push(latency) }
           }
 
-          if (usage) {
-            totalInput += usage.input || usage.input_tokens || 0
-            totalOutput += usage.output || usage.output_tokens || 0
-            totalCost += usage.cost?.total || 0
+          if (usageMetrics) {
+            totalInput += usageMetrics.input
+            totalOutput += usageMetrics.output
+            totalCost += usageMetrics.cost
           }
 
           if (textParts.length > 0 || toolCalls.length > 0 || thinking) {
@@ -1280,10 +1374,10 @@ agentSessionsRouter.get('/:id/sessions/:sessionKey(*)', (req, res) => {
               toolCalls,
               model: msg.model,
               stopReason: msg.stopReason,
-              usage: usage ? {
-                input: usage.input || usage.input_tokens || 0,
-                output: usage.output || usage.output_tokens || 0,
-                cost: usage.cost?.total || 0,
+              usage: usageMetrics ? {
+                input: usageMetrics.input,
+                output: usageMetrics.output,
+                cost: usageMetrics.cost,
               } : null,
               latency,
             })
@@ -1358,8 +1452,8 @@ router.get('/cost', (req, res) => {
               const entry = JSON.parse(line)
               if (entry.message?.role !== 'assistant') continue
               if (isDeliveryMirrorMessage(entry.message)) continue
-              const usage = entry.message?.usage ?? entry.usage
-              if (!usage) continue
+              const usageMetrics = normalizeUsageMetrics(entry.message?.usage ?? entry.usage)
+              if (!usageMetrics) continue
               const ts = entry.timestamp
               if (!ts || new Date(ts) < cutoff) continue
 
@@ -1367,11 +1461,9 @@ router.get('/cost', (req, res) => {
               if (!dayData[date]) dayData[date] = {}
               if (!dayData[date][agent.id]) dayData[date][agent.id] = { cost: 0, inputTokens: 0, outputTokens: 0, turns: 0 }
 
-              const inp = usage.input || usage.input_tokens || 0
-              const out = usage.output || usage.output_tokens || 0
-              dayData[date][agent.id].cost += usage.cost?.total ? usage.cost.total : ((inp / 1000000) * 3 + (out / 1000000) * 15)
-              dayData[date][agent.id].inputTokens += inp
-              dayData[date][agent.id].outputTokens += out
+              dayData[date][agent.id].cost += usageMetrics.cost
+              dayData[date][agent.id].inputTokens += usageMetrics.input
+              dayData[date][agent.id].outputTokens += usageMetrics.output
               dayData[date][agent.id].turns++
             } catch {}
           }
@@ -1423,7 +1515,10 @@ module.exports = {
     normalizeSessionEntry,
     shouldIncludeMonitorMessage,
     extractToolResultText,
+    normalizeUsageMetrics,
+    normalizeTrajectoryEntries,
     parseToolNotFound,
+    resolveMonitorSessionSource,
     summarizeToolLoopWarnings,
   },
 }

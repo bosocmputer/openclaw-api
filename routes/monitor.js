@@ -18,6 +18,7 @@ const MAX_SESSIONS_PER_AGENT = 300
 const MAX_CONVERSATION_LINES = 220
 const MAX_CONVERSATION_SESSIONS_PER_AGENT = 120
 const MAX_CONVERSATION_TEXT = 1200
+const MAX_GATEWAY_MONITOR_TURNS = 80
 const DEFAULT_GATEWAY_LOG_DIR = '/tmp/openclaw'
 
 function readTailLines(filePath, maxLines, maxBytes = MAX_TAIL_BYTES) {
@@ -105,6 +106,30 @@ function decodeMonitorText(value) {
   }
 }
 
+function parseTelegramNativeTarget(target) {
+  const parts = String(target || '').split(':')
+  const agentIdx = parts.findIndex(part => part === 'agent')
+  const telegramIdx = parts.findIndex(part => part === 'telegram')
+  if (agentIdx === -1 || telegramIdx === -1) return null
+  return {
+    agentId: parts[agentIdx + 1] || null,
+    user: parts.slice(telegramIdx + 1).join(':') || 'telegram',
+  }
+}
+
+function nativeCommandReply(command) {
+  switch (String(command || '').toLowerCase()) {
+    case '/reset':
+      return '✅ Session reset.'
+    case '/new':
+      return '✅ New session started.'
+    case '/compact':
+      return '✅ Session compacted.'
+    default:
+      return 'Native command handled.'
+  }
+}
+
 function safeSnippet(value, max = MAX_CONVERSATION_TEXT) {
   return String(value || '').replace(/\s+/g, ' ').trim().slice(0, max)
 }
@@ -145,8 +170,34 @@ function buildConversationTurnsFromGatewayLog({ minutes, agent, channel, limit }
   }
   for (const line of lines) {
     const parsed = parseGatewayLogLine(line)
-    if (!parsed.message.includes('telegram_monitor_turn')) continue
     if (parsed.timeMs && parsed.timeMs < cutoffMs) continue
+    if (parsed.message.includes('telegram native_command_fast_path')) {
+      const kv = parseGatewayKeyValues(parsed.message)
+      const target = parseTelegramNativeTarget(kv.target)
+      if (!target?.agentId) continue
+      if (agent && target.agentId !== agent) continue
+      turns.push({
+        id: `native:${parsed.timeRaw || turns.length}:${kv.command || 'command'}`,
+        source: 'gateway',
+        startedAt: parsed.timeRaw || new Date().toISOString(),
+        agentId: target.agentId,
+        channel: 'telegram',
+        user: target.user,
+        userText: kv.command || '/command',
+        finalText: nativeCommandReply(kv.command),
+        route: 'native',
+        intent: 'native',
+        status: 'ok',
+        rootCause: 'native_command',
+        durationMs: null,
+        ackMs: null,
+        modelMs: null,
+        toolPath: [],
+        warnings: [],
+      })
+      continue
+    }
+    if (!parsed.message.includes('telegram_monitor_turn')) continue
     const kv = parseGatewayKeyValues(parsed.message)
     if (agent && kv.agent !== agent) continue
     const tools = kv.tools && kv.tools !== '-' ? String(kv.tools).split('->').filter(Boolean) : []
@@ -175,6 +226,98 @@ function buildConversationTurnsFromGatewayLog({ minutes, agent, channel, limit }
     })
   }
   return turns.slice(-limit)
+}
+
+function timePartFromMs(ms) {
+  if (!Number.isFinite(ms)) return null
+  return new Date(ms).toISOString().slice(11, 19)
+}
+
+function buildGatewayMonitorSessions({ seenModelTexts } = {}) {
+  const turns = buildConversationTurnsFromGatewayLog({
+    minutes: 180,
+    channel: 'telegram',
+    limit: MAX_GATEWAY_MONITOR_TURNS,
+  })
+  const byAgent = new Map()
+  const globalEvents = []
+  const stats = {
+    messages: 0,
+    responseTimes: [],
+    errors: 0,
+  }
+  const today = new Date().toISOString().slice(0, 10)
+
+  for (const turn of turns) {
+    if (!turn.agentId) continue
+    const userText = safeSnippet(turn.userText, 600)
+    const finalText = safeSnippet(turn.finalText, 600)
+    if (turn.route === 'model_path' && userText && seenModelTexts?.has(`${turn.agentId}|${userText}`)) {
+      continue
+    }
+    const endMs = new Date(turn.startedAt).getTime()
+    const durationMs = Number(turn.durationMs || 0)
+    const startMs = Number.isFinite(endMs) && durationMs > 0 ? endMs - durationMs : endMs
+    const startTs = timePartFromMs(startMs) || timePartFromMs(endMs)
+    const endTs = timePartFromMs(endMs) || startTs
+    const latencySec = durationMs > 0 ? Math.round(durationMs / 100) / 10 : undefined
+    const events = []
+    if (userText) {
+      events.push({ ts: startTs, type: 'message', text: userText })
+      if (Number.isFinite(startMs) && new Date(startMs).toISOString().slice(0, 10) === today) {
+        stats.messages += 1
+      }
+    }
+    for (const tool of turn.toolPath || []) {
+      const toolDurationSec = tool.durationMs != null ? Math.round(tool.durationMs / 100) / 10 : undefined
+      events.push({
+        ts: endTs,
+        type: 'tool',
+        text: `${tool.name}${tool.durationMs != null ? ` ${tool.durationMs}ms` : ''}`,
+        toolName: tool.name,
+        ...(toolDurationSec != null ? { latency: toolDurationSec } : {}),
+      })
+    }
+    if (finalText) {
+      events.push({
+        ts: endTs,
+        type: turn.status === 'ok' ? 'reply' : 'error',
+        text: finalText,
+        ...(latencySec != null ? { latency: latencySec } : {}),
+      })
+    }
+    if (events.length === 0) continue
+    if (latencySec != null) stats.responseTimes.push(latencySec)
+    if (turn.status !== 'ok') stats.errors += 1
+    const session = {
+      sessionKey: `gateway:${turn.id}`,
+      user: turn.user || 'telegram',
+      state: turn.status === 'ok' ? 'replied' : 'error',
+      lastMessageAt: Number.isFinite(endMs) ? new Date(endMs).toISOString() : turn.startedAt,
+      lastUserText: userText || null,
+      lastReplyText: finalText || null,
+      elapsed: Number.isFinite(endMs) ? Math.max(0, Math.floor((Date.now() - endMs) / 1000)) : 0,
+      cost: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      warnings: turn.warnings || [],
+      toolChain: (turn.toolPath || []).map(tool => tool.name),
+      events,
+    }
+    if (!byAgent.has(turn.agentId)) byAgent.set(turn.agentId, [])
+    byAgent.get(turn.agentId).push(session)
+    for (const ev of events) {
+      globalEvents.push({
+        ts: ev.ts,
+        agentId: turn.agentId,
+        channel: 'telegram',
+        user: session.user,
+        type: ev.type,
+        text: ev.text,
+      })
+    }
+  }
+  return { byAgent, globalEvents, stats }
 }
 
 function buildConversationTurnsFromSession(params) {
@@ -596,6 +739,7 @@ router.get('/events', async (req, res) => {
     let errors = 0
     let responseTimes = []
     const globalEvents = []
+    const seenModelTexts = new Set()
 
     const agentsResult = []
 
@@ -779,6 +923,9 @@ router.get('/events', async (req, res) => {
               if (t) text = stripGatewayMetadata(t.text)
             }
             if (text) events.push({ ts: tsFormatted, type: 'message', text })
+            if (channel === 'telegram' && text) {
+              seenModelTexts.add(`${agentId}|${safeSnippet(text, 600)}`)
+            }
           } else if (msg.role === 'assistant') {
             const modelError = detectModelError(msg)
             if (modelError) {
@@ -925,6 +1072,18 @@ router.get('/events', async (req, res) => {
 
       agentsResult.push({ id: agentId, channels })
     }
+
+    const gatewayMonitor = buildGatewayMonitorSessions({ seenModelTexts })
+    for (const agent of agentsResult) {
+      const sessions = gatewayMonitor.byAgent.get(agent.id)
+      if (!sessions?.length) continue
+      if (!agent.channels.telegram) agent.channels.telegram = []
+      agent.channels.telegram.push(...sessions)
+    }
+    globalEvents.push(...gatewayMonitor.globalEvents)
+    totalMessages += gatewayMonitor.stats.messages
+    errors += gatewayMonitor.stats.errors
+    responseTimes.push(...gatewayMonitor.stats.responseTimes)
 
     // Sort globalEvents by ts descending and limit to last 50
     globalEvents.sort((a, b) => (b.ts || '').localeCompare(a.ts || ''))

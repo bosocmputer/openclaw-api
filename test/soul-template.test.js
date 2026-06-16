@@ -30,8 +30,12 @@ test('stock template enforces stock balance workflow after single product match'
 
   assert.match(soul, /stock-flow-v1/)
   assert.match(soul, /ยอดคงเหลือ.*ให้รหัสสินค้าแล้ว.*เรียก get_stock_balance โดยตรง/s)
+  assert.match(soul, /search_product ด้วย limit:20/)
   assert.match(soul, /search_product พบสินค้า 1 รายการ.*เรียก get_stock_balance ต่อทันที/s)
+  assert.match(soul, /ไม่มี page\/offset ใน schema.*พบ X รายการ แสดงได้สูงสุด Y รายการแรก/s)
+  assert.match(soul, /ห้ามบอกว่าเปิดหน้าถัดไปได้/)
   assert.match(soul, /รายการ N.*ระบบแนบรหัสที่ตีความแล้ว.*เรียก get_stock_balance ทันที/s)
+  assert.match(soul, /เลือกเลขที่ไม่ได้อยู่ในรายการที่แสดง.*ยังเลือกไม่ได้/s)
   assert.match(soul, /found:0.*พบสินค้า CODE - NAME แล้ว แต่ไม่พบยอดคงเหลือในคลังครับ/s)
   assert.match(soul, /ห้ามตอบ generic/)
   assert.match(soul, /ห้ามตอบว่าไม่พบสินค้า/)
@@ -39,6 +43,20 @@ test('stock template enforces stock balance workflow after single product match'
   assert.match(soul, /ห้ามปนภาษาอังกฤษในคำตอบสุดท้าย/)
   assert.match(soul, /ห้ามใส่รายการ follow-up ยาว/)
   assert.match(soul, /native command ที่ระบบจัดการเองแล้ว.*ห้ามตอบซ้ำ/)
+})
+
+test('stock template allows search pagination only when schema exposes page or offset', () => {
+  const tools = getFallbackTools('stock').map(tool => {
+    if (tool.name !== 'search_product') return tool
+    return { ...tool, args: ['keyword', 'limit', 'page'] }
+  })
+  const soul = generateSoulTemplate(null, 'stock', null, 'professional', {
+    tools,
+    toolSource: 'live',
+  })
+
+  assert.match(soul, /ถ้า total_found > returned และ user ขอหน้าถัดไป ให้ใช้ page หรือ offset/)
+  assert.doesNotMatch(soul, /search_product ไม่มี page\/offset ใน schema/)
 })
 
 test('sales template keeps price tool instructions', () => {

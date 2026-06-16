@@ -54,6 +54,70 @@ test('latency parser accepts legacy space-separated Telegram markers', () => {
   assert.equal(data.turns[0].rootCause, 'queue_coalesced')
 })
 
+test('latency parser warns when stock price denial sees stock intent', () => {
+  const data = buildLatencyFromLines([
+    jsonLine(
+      '2026-06-15T12:00:00.000Z',
+      'telegram_stock_price_denied agent=stock turnId=tg_denied chat=7548005041 stockIntent=true ambiguousPrice=true'
+    ),
+  ], { minutes: 1440 })
+
+  assert.equal(data.summary.count, 1)
+  assert.equal(data.turns[0].rootCause, 'stock_price_denial')
+  assert.equal(data.turns[0].guardrail, 'stock_price_denial')
+  assert.equal(data.turns[0].stockIntent, true)
+  assert.equal(data.turns[0].ambiguousPrice, true)
+  assert.equal(data.warnings[0].type, 'stock_price_denial_stock_intent')
+  assert.equal(data.warnings[0].turnId, 'tg_denied')
+  assert.equal(data.warnings[0].chatIdRedacted, '75…41')
+})
+
+test('latency parser does not warn for explicit stock price denial without stock intent', () => {
+  const data = buildLatencyFromLines([
+    jsonLine(
+      '2026-06-15T12:00:00.000Z',
+      'telegram_stock_price_denied agent=stock turnId=tg_price chat=7548005041 stockIntent=false ambiguousPrice=false'
+    ),
+  ], { minutes: 1440 })
+
+  assert.equal(data.summary.count, 1)
+  assert.equal(data.turns[0].rootCause, 'stock_price_denial')
+  assert.deepEqual(data.warnings, [])
+})
+
+test('latency parser classifies generic tool router turns', () => {
+  const data = buildLatencyFromLines([
+    jsonLine('2026-06-15T12:00:00.000Z', 'telegram_context_ready agent=stock turnId=tg_tool chat=7548005041 media=0 elapsedMs=20'),
+    jsonLine('2026-06-15T12:00:00.010Z', 'telegram_ack_scheduled agent=stock turnId=tg_tool key=k delayMs=800 timeoutMs=1500'),
+    jsonLine('2026-06-15T12:00:00.030Z', 'telegram_intent_routed agent=stock turnId=tg_tool intent=stock_balance accessMode=stock'),
+    jsonLine('2026-06-15T12:00:00.180Z', 'telegram_tool_path agent=stock turnId=tg_tool intent=stock_balance tools=search_product->get_stock_balance searchMs=40 balanceMs=80'),
+    jsonLine('2026-06-15T12:00:00.300Z', 'telegram_final_sent agent=stock turnId=tg_tool chat=7548005041 elapsedMs=300 ackSent=false'),
+  ], { minutes: 1440 })
+
+  assert.equal(data.summary.count, 1)
+  assert.equal(data.turns[0].rootCause, 'tool_path_used')
+  assert.equal(data.turns[0].guardrail, 'generic_tool_router')
+  assert.deepEqual(data.turns[0].toolPath, ['search_product', 'get_stock_balance'])
+  assert.equal(data.turns[0].mcpSearchMs, 40)
+  assert.equal(data.turns[0].mcpBalanceMs, 80)
+  assert.equal(data.turns[0].ackDelayMs, 800)
+})
+
+test('latency parser surfaces generic tool router failures', () => {
+  const data = buildLatencyFromLines([
+    jsonLine('2026-06-15T12:00:00.000Z', 'telegram_intent_routed agent=stock turnId=tg_fail intent=stock_balance accessMode=stock'),
+    jsonLine('2026-06-15T12:00:00.120Z', 'telegram_tool_path_failed agent=stock turnId=tg_fail tool=search_product elapsedMs=120 error=timeout'),
+    jsonLine('2026-06-15T12:00:01.000Z', 'telegram_model_start agent=stock turnId=tg_fail elapsedMs=1000'),
+  ], { minutes: 1440 })
+
+  assert.equal(data.summary.count, 1)
+  assert.equal(data.turns[0].rootCause, 'tool_path_failed_model_running')
+  assert.equal(data.turns[0].guardrail, 'generic_tool_router')
+  assert.equal(data.turns[0].failedTool, 'search_product')
+  assert.equal(data.warnings[0].type, 'generic_tool_router_tool_path_failed')
+  assert.equal(data.warnings[0].tool, 'search_product')
+})
+
 test('redactChatId keeps support payload safe', () => {
   assert.equal(redactChatId('7548005041'), '75…41')
   assert.equal(redactChatId('123'), '<redacted>')

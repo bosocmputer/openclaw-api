@@ -269,8 +269,21 @@ copy_runtime_file() {
 
 copy_runtime_glob_from_dir() {
   local src_dir="$1"
-  find "$src_dir" -maxdepth 1 -type f -print0 | while IFS= read -r -d '' file; do
-    copy_runtime_file "$file"
+  if [[ -w "$RUNTIME_DIST_DIR" ]]; then
+    rsync -a "$src_dir"/ "$RUNTIME_DIST_DIR"/
+    return 0
+  fi
+  if sudo_available; then
+    run_sudo rsync -a "$src_dir"/ "$RUNTIME_DIST_DIR"/
+    run_sudo find "$RUNTIME_DIST_DIR" -type f -exec chmod 0644 {} + || true
+    run_sudo find "$RUNTIME_DIST_DIR" -type d -exec chmod 0755 {} + || true
+    return 0
+  fi
+  find "$src_dir" -type f -print0 | while IFS= read -r -d '' file; do
+    local rel="${file#$src_dir/}"
+    local dest="$RUNTIME_DIST_DIR/$rel"
+    mkdir -p "$(dirname "$dest")"
+    cp "$file" "$dest"
   done
 }
 
@@ -303,11 +316,17 @@ function readArtifactManifest() {
   return null
 }
 const distFiles = {}
-for (const name of ['bot-r6hl6ztC.js', 'openclaw-tools-ChLzmhJi.js']) {
-  const file = `${distDir}/${name}`
-  const hash = sha(file)
-  if (hash) distFiles[name] = { sha256: hash }
-}
+  let names = []
+  try {
+    names = fs.readdirSync(distDir)
+      .filter(name => /^bot-.*\.js$/.test(name) || /^openclaw-tools-.*\.js$/.test(name))
+      .sort()
+  } catch {}
+  for (const name of names) {
+    const file = path.join(distDir, name)
+    const hash = sha(file)
+    if (hash) distFiles[name] = { sha256: hash }
+  }
 const metadata = {
   generatedAt: new Date().toISOString(),
   backupId,
@@ -343,7 +362,7 @@ deploy_artifact() {
 
   if [[ -d "$artifact_dir/openclaw-dist" ]]; then
     copy_runtime_glob_from_dir "$artifact_dir/openclaw-dist"
-    find "$artifact_dir/openclaw-dist" -maxdepth 1 -name '*.js' -print0 | while IFS= read -r -d '' file; do
+    find "$artifact_dir/openclaw-dist" -maxdepth 1 -type f \( -name 'bot-*.js' -o -name 'openclaw-tools-*.js' \) -print0 | while IFS= read -r -d '' file; do
       node --check "$RUNTIME_DIST_DIR/$(basename "$file")"
     done
     CHANGED_RUNTIME=1

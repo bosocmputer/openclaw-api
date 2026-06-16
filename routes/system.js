@@ -93,10 +93,13 @@ function sha256File(filePath) {
 
 function releaseState() {
   const distDir = '/usr/lib/node_modules/openclaw/dist'
-  const distFiles = [
-    'bot-r6hl6ztC.js',
-    'openclaw-tools-ChLzmhJi.js',
-  ].map(name => {
+  let distEntryNames = []
+  try {
+    distEntryNames = fs.readdirSync(distDir)
+      .filter(name => /^bot-.*\.js$/.test(name) || /^openclaw-tools-.*\.js$/.test(name))
+      .sort()
+  } catch {}
+  const distFiles = distEntryNames.map(name => {
     const filePath = path.join(distDir, name)
     try {
       const stat = fs.statSync(filePath)
@@ -677,6 +680,9 @@ router.get('/support-bundle', async (req, res) => {
       recentToolLoopWarnings: recentToolLoopWarnings(readOpenclawConfig()),
       latencySummary: latency.summary,
       recentSlowTurns: latency.slowest.slice(0, 10),
+      recentGuardrailWarnings: latency.warnings
+        .filter(w => w.type === 'stock_price_denial_stock_intent')
+        .slice(0, 10),
       repos,
       processStatus,
       runtime: {

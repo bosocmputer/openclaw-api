@@ -60,13 +60,16 @@ require_dir "openclaw-admin" "$ADMIN_DIR"
 
 if [[ "$INCLUDE_RUNTIME" -eq 1 ]]; then
   require_dir "runtime dist" "$RUNTIME_DIST_DIR"
-  for file in bot-r6hl6ztC.js openclaw-tools-ChLzmhJi.js; do
-    [[ -f "$RUNTIME_DIST_DIR/$file" ]] || {
-      err "Required runtime dist file missing: $RUNTIME_DIST_DIR/$file"
-      err "Build openclaw runtime first, pass --runtime-dist-dir, or use --no-runtime for API/Admin-only releases."
-      exit 1
-    }
-  done
+  find "$RUNTIME_DIST_DIR" -maxdepth 1 -type f -name 'bot-*.js' | grep -q . || {
+    err "No bot-*.js runtime entry found in $RUNTIME_DIST_DIR"
+    err "Build openclaw runtime first, pass --runtime-dist-dir, or use --no-runtime for API/Admin-only releases."
+    exit 1
+  }
+  find "$RUNTIME_DIST_DIR" -maxdepth 1 -type f -name 'openclaw-tools-*.js' | grep -q . || {
+    err "No openclaw-tools-*.js runtime entry found in $RUNTIME_DIST_DIR"
+    err "Build openclaw runtime first, pass --runtime-dist-dir, or use --no-runtime for API/Admin-only releases."
+    exit 1
+  }
 fi
 
 rm -rf "$STAGE_DIR"
@@ -97,8 +100,7 @@ rsync -a "${COMMON_EXCLUDES[@]}" \
 if [[ "$INCLUDE_RUNTIME" -eq 1 ]]; then
   log "Copying runtime dist files"
   mkdir -p "$STAGE_DIR/openclaw-dist"
-  cp "$RUNTIME_DIST_DIR/bot-r6hl6ztC.js" "$STAGE_DIR/openclaw-dist/"
-  cp "$RUNTIME_DIST_DIR/openclaw-tools-ChLzmhJi.js" "$STAGE_DIR/openclaw-dist/"
+  rsync -a "$RUNTIME_DIST_DIR"/ "$STAGE_DIR/openclaw-dist"/
 fi
 
 log "Running syntax checks on artifact"
@@ -106,8 +108,8 @@ find "$STAGE_DIR/openclaw-api/routes" "$STAGE_DIR/openclaw-api/lib" -maxdepth 2 
   | xargs -0 -r -n1 node --check
 bash -n "$STAGE_DIR/openclaw-api/scripts/update-server.sh"
 if [[ "$INCLUDE_RUNTIME" -eq 1 ]]; then
-  node --check "$STAGE_DIR/openclaw-dist/bot-r6hl6ztC.js"
-  node --check "$STAGE_DIR/openclaw-dist/openclaw-tools-ChLzmhJi.js"
+  find "$STAGE_DIR/openclaw-dist" -maxdepth 1 -type f \( -name 'bot-*.js' -o -name 'openclaw-tools-*.js' \) -print0 \
+    | xargs -0 -r -n1 node --check
 fi
 
 log "Writing release manifest"

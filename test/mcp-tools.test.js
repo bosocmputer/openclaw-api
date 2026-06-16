@@ -29,6 +29,15 @@ test('fallback tool snapshots exclude generic fallback and write tools by defaul
   }
 })
 
+test('fallback search_product exposes optional limit arg', () => {
+  const search = getFallbackTools('stock').find(t => t.name === 'search_product')
+
+  assert.ok(search)
+  assert.deepEqual(search.required, ['keyword'])
+  assert.ok(search.args.includes('keyword'))
+  assert.ok(search.args.includes('limit'))
+})
+
 test('legacy sale agent ids normalize to sales access mode', () => {
   assert.equal(normalizeAccessMode('sale'), 'sales')
   assert.equal(normalizeAccessMode('sale_goh'), 'sales')

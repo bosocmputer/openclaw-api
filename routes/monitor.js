@@ -15,6 +15,10 @@ const MAX_SESSION_LINES = 1200
 const MAX_COST_LINES_PER_FILE = 2500
 const MAX_COST_FILES_PER_AGENT = 200
 const MAX_SESSIONS_PER_AGENT = 300
+const MAX_CONVERSATION_LINES = 220
+const MAX_CONVERSATION_SESSIONS_PER_AGENT = 120
+const MAX_CONVERSATION_TEXT = 1200
+const DEFAULT_GATEWAY_LOG_DIR = '/tmp/openclaw'
 
 function readTailLines(filePath, maxLines, maxBytes = MAX_TAIL_BYTES) {
   const stat = fs.statSync(filePath)
@@ -42,6 +46,254 @@ function latestFiles(dir, predicate, limit) {
     .sort((a, b) => b.mtime - a.mtime)
     .slice(0, limit)
     .map(f => f.name)
+}
+
+function parseGatewayKeyValues(message) {
+  const values = {}
+  for (const match of String(message || '').matchAll(/([A-Za-z][A-Za-z0-9_]*)=([^\s]+)/g)) {
+    values[match[1]] = match[2]
+  }
+  return values
+}
+
+function parseGatewayLogLine(line) {
+  try {
+    const obj = JSON.parse(line)
+    const raw = obj['1'] ?? obj.message ?? obj.msg ?? obj['0'] ?? ''
+    const message = typeof raw === 'object' ? JSON.stringify(raw) : String(raw)
+    const timeRaw = obj.time || obj._meta?.date || obj.timestamp
+    return {
+      timeRaw,
+      timeMs: timeRaw ? new Date(timeRaw).getTime() : null,
+      message,
+    }
+  } catch {
+    const timeMatch = String(line).match(/^(\d{4}-\d{2}-\d{2}T[^\s]+)/)
+    return {
+      timeRaw: timeMatch?.[1] || null,
+      timeMs: timeMatch ? new Date(timeMatch[1]).getTime() : null,
+      message: String(line),
+    }
+  }
+}
+
+function latestGatewayLogFile(logDir = DEFAULT_GATEWAY_LOG_DIR) {
+  if (!fs.existsSync(logDir)) return null
+  const files = fs.readdirSync(logDir)
+    .filter(name => name.endsWith('.log') || name.endsWith('.jsonl'))
+    .map(name => {
+      try {
+        const fullPath = path.join(logDir, name)
+        return { fullPath, mtime: fs.statSync(fullPath).mtimeMs }
+      } catch {
+        return null
+      }
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.mtime - a.mtime)
+  return files[0]?.fullPath || null
+}
+
+function decodeMonitorText(value) {
+  const raw = String(value || '')
+  if (!raw || raw === '-') return ''
+  try {
+    const text = Buffer.from(raw, 'base64url').toString('utf8')
+    return text.replace(/\s+/g, ' ').trim().slice(0, MAX_CONVERSATION_TEXT)
+  } catch {
+    return ''
+  }
+}
+
+function safeSnippet(value, max = MAX_CONVERSATION_TEXT) {
+  return String(value || '').replace(/\s+/g, ' ').trim().slice(0, max)
+}
+
+function readSessionText(msg) {
+  return safeSnippet(stripGatewayMetadata(extractMessageText(msg)))
+}
+
+function parseSessionChannelUser(key) {
+  if (key.includes('hook:webchat')) {
+    const parts = key.split(':')
+    return { channel: 'webchat', user: parts[parts.length - 1] || 'webchat' }
+  }
+  if (key.includes('telegram')) {
+    const parts = key.split(':')
+    const telegramIdx = parts.findIndex(p => p === 'telegram')
+    return { channel: 'telegram', user: parts.slice(telegramIdx + 1).join(':') || 'telegram' }
+  }
+  if (key.includes(':line:')) {
+    const parts = key.split(':')
+    const lineIdx = parts.findIndex(p => p === 'line')
+    return { channel: 'line', user: parts.slice(lineIdx + 1).join(':') || 'line' }
+  }
+  return null
+}
+
+function buildConversationTurnsFromGatewayLog({ minutes, agent, channel, limit }) {
+  if (channel && channel !== 'telegram') return []
+  const latestLog = latestGatewayLogFile()
+  if (!latestLog) return []
+  const cutoffMs = Date.now() - minutes * 60 * 1000
+  const turns = []
+  let lines = []
+  try {
+    lines = readTailLines(latestLog, 3000, 2 * 1024 * 1024)
+  } catch {
+    return []
+  }
+  for (const line of lines) {
+    const parsed = parseGatewayLogLine(line)
+    if (!parsed.message.includes('telegram_monitor_turn')) continue
+    if (parsed.timeMs && parsed.timeMs < cutoffMs) continue
+    const kv = parseGatewayKeyValues(parsed.message)
+    if (agent && kv.agent !== agent) continue
+    const tools = kv.tools && kv.tools !== '-' ? String(kv.tools).split('->').filter(Boolean) : []
+    turns.push({
+      id: kv.turnId || `gateway:${parsed.timeRaw || turns.length}`,
+      source: 'gateway',
+      startedAt: parsed.timeRaw || new Date().toISOString(),
+      agentId: kv.agent || null,
+      channel: 'telegram',
+      user: 'telegram',
+      userText: decodeMonitorText(kv.userTextB64),
+      finalText: decodeMonitorText(kv.finalTextB64),
+      route: kv.route || 'tool_path',
+      intent: kv.intent || 'unknown',
+      status: kv.status === 'sent' ? 'ok' : (kv.status || 'warn'),
+      rootCause: kv.route || null,
+      durationMs: Number(kv.durationMs || 0) || null,
+      ackMs: null,
+      modelMs: null,
+      toolPath: tools.map(name => ({
+        name,
+        status: 'ok',
+        durationMs: name.includes('search') ? Number(kv.searchMs || 0) || null : name.includes('balance') ? Number(kv.balanceMs || 0) || null : null,
+      })),
+      warnings: [],
+    })
+  }
+  return turns.slice(-limit)
+}
+
+function buildConversationTurnsFromSession(params) {
+  const { agentId, sessionKey, user, channel, sessionFile, minutes } = params
+  let lines = []
+  try {
+    lines = readTailLines(sessionFile, MAX_CONVERSATION_LINES)
+  } catch {
+    return []
+  }
+  const cutoffMs = Date.now() - minutes * 60 * 1000
+  const turns = []
+  let current = null
+  let lastTool = null
+
+  function pushCurrent() {
+    if (!current) return
+    if (current.startedAtMs && current.startedAtMs < cutoffMs) {
+      current = null
+      lastTool = null
+      return
+    }
+    const { startedAtMs, ...publicTurn } = current
+    turns.push(publicTurn)
+    current = null
+    lastTool = null
+  }
+
+  for (const line of lines) {
+    let entry
+    try { entry = JSON.parse(line) } catch { continue }
+    const msg = normalizeSessionEntry(entry)
+    if (!shouldIncludeMonitorMessage(msg)) continue
+    const ts = msg.timestamp || msg.ts || entry.timestamp || null
+    const tsMs = ts ? new Date(ts).getTime() : null
+
+    if (msg.role === 'user') {
+      pushCurrent()
+      current = {
+        id: `${sessionKey}:${ts || turns.length}`,
+        source: 'session',
+        sessionKey,
+        startedAt: ts || new Date().toISOString(),
+        startedAtMs: tsMs,
+        agentId,
+        channel,
+        user,
+        userText: readSessionText(msg),
+        finalText: '',
+        route: 'model_path',
+        intent: 'unknown',
+        status: 'pending',
+        rootCause: null,
+        durationMs: null,
+        ackMs: null,
+        modelMs: null,
+        toolPath: [],
+        warnings: [],
+      }
+      continue
+    }
+
+    if (!current && msg.role !== 'toolResult') {
+      continue
+    }
+
+    if (msg.role === 'assistant') {
+      const modelError = detectModelError(msg)
+      if (modelError && current) {
+        current.status = 'error'
+        current.rootCause = modelError.type
+        current.warnings.push(modelError)
+      }
+      const c = msg.content
+      if (Array.isArray(c) && current) {
+        for (const item of c) {
+          if (item.type === 'tool_use' || item.type === 'toolCall') {
+            const tool = {
+              name: item.name || 'tool',
+              status: 'pending',
+              argsPreview: item.input ? safeSnippet(JSON.stringify(item.input), 500) : '',
+              resultSummary: '',
+              durationMs: null,
+            }
+            current.toolPath.push(tool)
+            lastTool = tool
+          } else if (item.type === 'text' && item.text) {
+            const text = safeSnippet(item.text)
+            current.finalText = text
+            current.status = current.status === 'error' ? 'error' : 'ok'
+            if (tsMs && current.startedAtMs) current.durationMs = tsMs - current.startedAtMs
+            for (const warning of detectReplyQualityWarnings(text)) current.warnings.push(warning)
+          }
+        }
+      } else if (typeof c === 'string' && current) {
+        const text = safeSnippet(c)
+        current.finalText = text
+        current.status = current.status === 'error' ? 'error' : 'ok'
+        if (tsMs && current.startedAtMs) current.durationMs = tsMs - current.startedAtMs
+        for (const warning of detectReplyQualityWarnings(text)) current.warnings.push(warning)
+      }
+    } else if (msg.role === 'toolResult' && current) {
+      const text = safeSnippet(extractToolResultText(msg), 800)
+      if (lastTool) {
+        lastTool.status = 'ok'
+        lastTool.resultSummary = text
+      }
+      const missingTool = parseToolNotFound(text)
+      if (missingTool) {
+        current.warnings.push({
+          type: 'tool_not_found',
+          toolName: missingTool,
+          summary: `Tool ${missingTool} not found`,
+        })
+      }
+    }
+  }
+  pushCurrent()
+  return turns
 }
 
 function isDeliveryMirrorMessage(msg) {
@@ -224,6 +476,91 @@ router.get('/latency', (req, res) => {
       })
     }
     res.json(buildLatencyFromGatewayLog({ minutes, agent }))
+  } catch (e) {
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// GET /api/monitor/conversations — operator-first turn feed across model and deterministic paths
+router.get('/conversations', async (req, res) => {
+  try {
+    const minutes = Math.min(Math.max(parseInt(req.query.minutes || '180', 10), 1), 1440)
+    const limit = Math.min(Math.max(parseInt(req.query.limit || '100', 10), 1), 300)
+    const agentFilter = req.query.agent ? String(req.query.agent) : undefined
+    const channelFilter = req.query.channel ? String(req.query.channel) : undefined
+
+    let config = {}
+    try { config = readOpenclawConfig() } catch { config = {} }
+    const agentList = config.agents?.list || []
+    const turns = []
+
+    for (const agent of agentList) {
+      const agentId = agent.id
+      if (agentFilter && agentFilter !== agentId) continue
+      const sessionsPath = path.join(HOME, `.openclaw/agents/${agentId}/sessions/sessions.json`)
+      let sessionsMap = {}
+      try { sessionsMap = JSON.parse(fs.readFileSync(sessionsPath, 'utf8')) } catch { continue }
+
+      const sessionEntries = Object.entries(sessionsMap)
+        .filter(([key, info]) => info && !key.includes(':main'))
+        .sort((a, b) => Number(b[1]?.updatedAt || 0) - Number(a[1]?.updatedAt || 0))
+        .slice(0, MAX_CONVERSATION_SESSIONS_PER_AGENT)
+
+      for (const [sessionKey, sessionInfo] of sessionEntries) {
+        const parsed = parseSessionChannelUser(sessionKey)
+        if (!parsed) continue
+        if (channelFilter && parsed.channel !== channelFilter) continue
+        const sessionFile = sessionInfo.sessionFile
+          || (sessionInfo.sessionId ? path.join(HOME, `.openclaw/agents/${agentId}/sessions/${sessionInfo.sessionId}.jsonl`) : null)
+        if (!sessionFile || !fs.existsSync(sessionFile)) continue
+        turns.push(...buildConversationTurnsFromSession({
+          agentId,
+          sessionKey,
+          user: parsed.user,
+          channel: parsed.channel,
+          sessionFile,
+          minutes,
+        }))
+      }
+    }
+
+    turns.push(...buildConversationTurnsFromGatewayLog({
+      minutes,
+      agent: agentFilter,
+      channel: channelFilter,
+      limit,
+    }))
+
+    turns.sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime())
+    const limitedTurns = turns.slice(0, limit)
+    const statusCounts = limitedTurns.reduce((acc, turn) => {
+      acc[turn.status] = (acc[turn.status] || 0) + 1
+      return acc
+    }, {})
+    const routeCounts = limitedTurns.reduce((acc, turn) => {
+      acc[turn.route] = (acc[turn.route] || 0) + 1
+      return acc
+    }, {})
+    const completedDurations = limitedTurns
+      .map(turn => Number(turn.durationMs || 0))
+      .filter(value => value > 0)
+    const avgDurationMs = completedDurations.length
+      ? Math.round(completedDurations.reduce((sum, value) => sum + value, 0) / completedDurations.length)
+      : null
+
+    res.json({
+      generatedAt: new Date().toISOString(),
+      windowMinutes: minutes,
+      summary: {
+        count: limitedTurns.length,
+        byStatus: statusCounts,
+        byRoute: routeCounts,
+        avgDurationMs,
+      },
+      turns: limitedTurns,
+      warnings: [],
+    })
   } catch (e) {
     console.error('[openclaw-api]', req.method, req.path, e.message)
     res.status(500).json({ error: 'Internal server error' })

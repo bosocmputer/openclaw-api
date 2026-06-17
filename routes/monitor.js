@@ -1536,82 +1536,86 @@ agentSessionsRouter.get('/:id/sessions/:sessionKey(*)', (req, res) => {
   }
 })
 
+function buildMonitorCost(days = 30) {
+  const config = readOpenclawConfig()
+  const agentList = config.agents?.list || []
+  const boundedDays = Math.min(Math.max(parseInt(days || '30'), 1), 90)
+  const cutoff = new Date()
+  cutoff.setDate(cutoff.getDate() - boundedDays)
+
+  // dayData[date][agentId] = { cost, inputTokens, outputTokens, turns }
+  const dayData = {}
+
+  for (const agent of agentList) {
+    const sessionsDir = path.join(HOME, `.openclaw/agents/${agent.id}/sessions`)
+    if (!fs.existsSync(sessionsDir)) continue
+
+    const files = latestFiles(
+      sessionsDir,
+      f => f.endsWith('.jsonl') && !f.includes('.reset.'),
+      MAX_COST_FILES_PER_AGENT
+    )
+
+    for (const file of files) {
+      try {
+        const lines = readTailLines(path.join(sessionsDir, file), MAX_COST_LINES_PER_FILE, 2 * 1024 * 1024)
+        for (const line of lines) {
+          try {
+            const entry = JSON.parse(line)
+            if (entry.message?.role !== 'assistant') continue
+            if (isDeliveryMirrorMessage(entry.message)) continue
+            const usageMetrics = normalizeUsageMetrics(entry.message?.usage ?? entry.usage)
+            if (!usageMetrics) continue
+            const ts = entry.timestamp
+            if (!ts || new Date(ts) < cutoff) continue
+
+            const date = ts.slice(0, 10)
+            if (!dayData[date]) dayData[date] = {}
+            if (!dayData[date][agent.id]) dayData[date][agent.id] = { cost: 0, inputTokens: 0, outputTokens: 0, turns: 0 }
+
+            dayData[date][agent.id].cost += usageMetrics.cost
+            dayData[date][agent.id].inputTokens += usageMetrics.input
+            dayData[date][agent.id].outputTokens += usageMetrics.output
+            dayData[date][agent.id].turns++
+          } catch {}
+        }
+      } catch {}
+    }
+  }
+
+  const sortedDates = Object.keys(dayData).sort()
+  const resultDays = sortedDates.map(date => {
+    const agents = Object.entries(dayData[date]).map(([agentId, s]) => ({
+      agentId,
+      cost: Math.round(s.cost * 100000) / 100000,
+      inputTokens: s.inputTokens,
+      outputTokens: s.outputTokens,
+      turns: s.turns,
+    })).sort((a, b) => b.cost - a.cost)
+    const total = agents.reduce((s, a) => s + a.cost, 0)
+    return { date, agents, total: Math.round(total * 100000) / 100000 }
+  })
+
+  const summaryByAgent = {}
+  for (const day of resultDays) {
+    for (const a of day.agents) {
+      summaryByAgent[a.agentId] = Math.round(((summaryByAgent[a.agentId] || 0) + a.cost) * 100000) / 100000
+    }
+  }
+
+  return {
+    days: resultDays,
+    summary: {
+      totalCost: Math.round(Object.values(summaryByAgent).reduce((a, b) => a + b, 0) * 100000) / 100000,
+      byAgent: summaryByAgent,
+    },
+  }
+}
+
 // GET /api/monitor/cost — aggregate cost per agent per day (last N days)
 router.get('/cost', (req, res) => {
   try {
-    const config = readOpenclawConfig()
-    const agentList = config.agents?.list || []
-    const days = Math.min(Math.max(parseInt(req.query.days || '30'), 1), 90)
-    const cutoff = new Date()
-    cutoff.setDate(cutoff.getDate() - days)
-
-    // dayData[date][agentId] = { cost, inputTokens, outputTokens, turns }
-    const dayData = {}
-
-    for (const agent of agentList) {
-      const sessionsDir = path.join(HOME, `.openclaw/agents/${agent.id}/sessions`)
-      if (!fs.existsSync(sessionsDir)) continue
-
-      const files = latestFiles(
-        sessionsDir,
-        f => f.endsWith('.jsonl') && !f.includes('.reset.'),
-        MAX_COST_FILES_PER_AGENT
-      )
-
-      for (const file of files) {
-        try {
-          const lines = readTailLines(path.join(sessionsDir, file), MAX_COST_LINES_PER_FILE, 2 * 1024 * 1024)
-          for (const line of lines) {
-            try {
-              const entry = JSON.parse(line)
-              if (entry.message?.role !== 'assistant') continue
-              if (isDeliveryMirrorMessage(entry.message)) continue
-              const usageMetrics = normalizeUsageMetrics(entry.message?.usage ?? entry.usage)
-              if (!usageMetrics) continue
-              const ts = entry.timestamp
-              if (!ts || new Date(ts) < cutoff) continue
-
-              const date = ts.slice(0, 10)
-              if (!dayData[date]) dayData[date] = {}
-              if (!dayData[date][agent.id]) dayData[date][agent.id] = { cost: 0, inputTokens: 0, outputTokens: 0, turns: 0 }
-
-              dayData[date][agent.id].cost += usageMetrics.cost
-              dayData[date][agent.id].inputTokens += usageMetrics.input
-              dayData[date][agent.id].outputTokens += usageMetrics.output
-              dayData[date][agent.id].turns++
-            } catch {}
-          }
-        } catch {}
-      }
-    }
-
-    const sortedDates = Object.keys(dayData).sort()
-    const resultDays = sortedDates.map(date => {
-      const agents = Object.entries(dayData[date]).map(([agentId, s]) => ({
-        agentId,
-        cost: Math.round(s.cost * 100000) / 100000,
-        inputTokens: s.inputTokens,
-        outputTokens: s.outputTokens,
-        turns: s.turns,
-      })).sort((a, b) => b.cost - a.cost)
-      const total = agents.reduce((s, a) => s + a.cost, 0)
-      return { date, agents, total: Math.round(total * 100000) / 100000 }
-    })
-
-    const summaryByAgent = {}
-    for (const day of resultDays) {
-      for (const a of day.agents) {
-        summaryByAgent[a.agentId] = Math.round(((summaryByAgent[a.agentId] || 0) + a.cost) * 100000) / 100000
-      }
-    }
-
-    res.json({
-      days: resultDays,
-      summary: {
-        totalCost: Math.round(Object.values(summaryByAgent).reduce((a, b) => a + b, 0) * 100000) / 100000,
-        byAgent: summaryByAgent,
-      },
-    })
+    res.json(buildMonitorCost(req.query.days || '30'))
   } catch (e) {
     console.error('[openclaw-api]', req.method, req.path, e.message)
     res.status(500).json({ error: 'Internal server error' })
@@ -1632,6 +1636,7 @@ module.exports = {
     normalizeUsageMetrics,
     normalizeTrajectoryEntries,
     buildConversationTurnsFromGatewayLog,
+    buildMonitorCost,
     parseToolNotFound,
     resolveMonitorSessionSource,
     monitorEventTime,

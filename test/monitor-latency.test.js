@@ -7,14 +7,19 @@ function jsonLine(time, message) {
   return JSON.stringify({ time, 1: message })
 }
 
+const BASE_TIME_MS = Date.now() - 60_000
+function recentTime(offsetMs = 0) {
+  return new Date(BASE_TIME_MS + offsetMs).toISOString()
+}
+
 test('latency parser joins Telegram markers by turnId', () => {
   const lines = [
-    jsonLine('2026-06-15T12:00:00.000Z', 'telegram_inbound_received agent=stock turnId=tg_test chat=7548005041 media=0'),
-    jsonLine('2026-06-15T12:00:00.120Z', 'telegram_context_ready agent=stock turnId=tg_test chat=7548005041 media=0 elapsedMs=120'),
-    jsonLine('2026-06-15T12:00:00.900Z', 'telegram_ack_sent agent=stock turnId=tg_test key=k latencyMs=805'),
-    jsonLine('2026-06-15T12:00:01.000Z', 'telegram_model_start agent=stock turnId=tg_test chat=7548005041 elapsedMs=1000'),
-    jsonLine('2026-06-15T12:00:02.000Z', 'telegram_tool_call agent=stock turnId=tg_test chat=7548005041 count=1 elapsedMs=2000'),
-    jsonLine('2026-06-15T12:00:03.000Z', 'telegram_final_sent agent=stock turnId=tg_test chat=7548005041 elapsedMs=3000 ackSent=true'),
+    jsonLine(recentTime(0), 'telegram_inbound_received agent=stock turnId=tg_test chat=7548005041 media=0'),
+    jsonLine(recentTime(120), 'telegram_context_ready agent=stock turnId=tg_test chat=7548005041 media=0 elapsedMs=120'),
+    jsonLine(recentTime(900), 'telegram_ack_sent agent=stock turnId=tg_test key=k latencyMs=805'),
+    jsonLine(recentTime(1000), 'telegram_model_start agent=stock turnId=tg_test chat=7548005041 elapsedMs=1000'),
+    jsonLine(recentTime(2000), 'telegram_tool_call agent=stock turnId=tg_test chat=7548005041 count=1 elapsedMs=2000'),
+    jsonLine(recentTime(3000), 'telegram_final_sent agent=stock turnId=tg_test chat=7548005041 elapsedMs=3000 ackSent=true'),
   ]
 
   const data = buildLatencyFromLines(lines, { minutes: 1440 })
@@ -34,7 +39,7 @@ test('latency parser joins Telegram markers by turnId', () => {
 
 test('latency parser warns when marker has no turnId', () => {
   const data = buildLatencyFromLines([
-    jsonLine('2026-06-15T12:00:00.000Z', 'telegram_ack_sent agent=stock key=k latencyMs=805'),
+    jsonLine(recentTime(), 'telegram_ack_sent agent=stock key=k latencyMs=805'),
   ], { minutes: 1440 })
 
   assert.equal(data.turns.length, 0)
@@ -43,9 +48,9 @@ test('latency parser warns when marker has no turnId', () => {
 
 test('latency parser accepts legacy space-separated Telegram markers', () => {
   const data = buildLatencyFromLines([
-    jsonLine('2026-06-15T12:00:00.000Z', 'telegram queue_coalesced scheduled turnId=tg_old key=k'),
-    jsonLine('2026-06-15T12:00:00.050Z', 'telegram stale_reply_suppressed agent=stock turnId=tg_old source=dispatch'),
-    jsonLine('2026-06-15T12:00:00.060Z', 'telegram reply_quality_warning agent=stock turnId=tg_old issues=cjk_text_repaired'),
+    jsonLine(recentTime(0), 'telegram queue_coalesced scheduled turnId=tg_old key=k'),
+    jsonLine(recentTime(50), 'telegram stale_reply_suppressed agent=stock turnId=tg_old source=dispatch'),
+    jsonLine(recentTime(60), 'telegram reply_quality_warning agent=stock turnId=tg_old issues=cjk_text_repaired'),
   ], { minutes: 1440 })
 
   assert.equal(data.summary.count, 1)
@@ -57,7 +62,7 @@ test('latency parser accepts legacy space-separated Telegram markers', () => {
 test('latency parser warns when stock price denial sees stock intent', () => {
   const data = buildLatencyFromLines([
     jsonLine(
-      '2026-06-15T12:00:00.000Z',
+      recentTime(),
       'telegram_stock_price_denied agent=stock turnId=tg_denied chat=7548005041 stockIntent=true ambiguousPrice=true'
     ),
   ], { minutes: 1440 })
@@ -75,7 +80,7 @@ test('latency parser warns when stock price denial sees stock intent', () => {
 test('latency parser does not warn for explicit stock price denial without stock intent', () => {
   const data = buildLatencyFromLines([
     jsonLine(
-      '2026-06-15T12:00:00.000Z',
+      recentTime(),
       'telegram_stock_price_denied agent=stock turnId=tg_price chat=7548005041 stockIntent=false ambiguousPrice=false'
     ),
   ], { minutes: 1440 })
@@ -87,11 +92,11 @@ test('latency parser does not warn for explicit stock price denial without stock
 
 test('latency parser classifies generic tool router turns', () => {
   const data = buildLatencyFromLines([
-    jsonLine('2026-06-15T12:00:00.000Z', 'telegram_context_ready agent=stock turnId=tg_tool chat=7548005041 media=0 elapsedMs=20'),
-    jsonLine('2026-06-15T12:00:00.010Z', 'telegram_ack_scheduled agent=stock turnId=tg_tool key=k delayMs=800 timeoutMs=1500'),
-    jsonLine('2026-06-15T12:00:00.030Z', 'telegram_intent_routed agent=stock turnId=tg_tool intent=stock_balance accessMode=stock'),
-    jsonLine('2026-06-15T12:00:00.180Z', 'telegram_tool_path agent=stock turnId=tg_tool intent=stock_balance tools=search_product->get_stock_balance searchMs=40 balanceMs=80'),
-    jsonLine('2026-06-15T12:00:00.300Z', 'telegram_final_sent agent=stock turnId=tg_tool chat=7548005041 elapsedMs=300 ackSent=false'),
+    jsonLine(recentTime(0), 'telegram_context_ready agent=stock turnId=tg_tool chat=7548005041 media=0 elapsedMs=20'),
+    jsonLine(recentTime(10), 'telegram_ack_scheduled agent=stock turnId=tg_tool key=k delayMs=800 timeoutMs=1500'),
+    jsonLine(recentTime(30), 'telegram_intent_routed agent=stock turnId=tg_tool intent=stock_balance accessMode=stock'),
+    jsonLine(recentTime(180), 'telegram_tool_path agent=stock turnId=tg_tool intent=stock_balance tools=search_product->get_stock_balance searchMs=40 balanceMs=80'),
+    jsonLine(recentTime(300), 'telegram_final_sent agent=stock turnId=tg_tool chat=7548005041 elapsedMs=300 ackSent=false'),
   ], { minutes: 1440 })
 
   assert.equal(data.summary.count, 1)
@@ -105,9 +110,9 @@ test('latency parser classifies generic tool router turns', () => {
 
 test('latency parser surfaces generic tool router failures', () => {
   const data = buildLatencyFromLines([
-    jsonLine('2026-06-15T12:00:00.000Z', 'telegram_intent_routed agent=stock turnId=tg_fail intent=stock_balance accessMode=stock'),
-    jsonLine('2026-06-15T12:00:00.120Z', 'telegram_tool_path_failed agent=stock turnId=tg_fail tool=search_product elapsedMs=120 error=timeout'),
-    jsonLine('2026-06-15T12:00:01.000Z', 'telegram_model_start agent=stock turnId=tg_fail elapsedMs=1000'),
+    jsonLine(recentTime(0), 'telegram_intent_routed agent=stock turnId=tg_fail intent=stock_balance accessMode=stock'),
+    jsonLine(recentTime(120), 'telegram_tool_path_failed agent=stock turnId=tg_fail tool=search_product elapsedMs=120 error=timeout'),
+    jsonLine(recentTime(1000), 'telegram_model_start agent=stock turnId=tg_fail elapsedMs=1000'),
   ], { minutes: 1440 })
 
   assert.equal(data.summary.count, 1)

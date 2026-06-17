@@ -17,6 +17,8 @@ const {
 
 const HEALTH_TTL_MS = 30_000
 const EXTERNAL_TIMEOUT_MS = 1800
+const TARGET_OPENCLAW_VERSION = '2026.6.8'
+const MIN_NODE_VERSION = '22.19.0'
 let healthCache = null
 
 function nowIso() {
@@ -91,8 +93,76 @@ function sha256File(filePath) {
   }
 }
 
+function parseOpenclawVersion(output) {
+  const match = String(output || '').match(/(?:OpenClaw\s+)?(\d{4}\.\d+\.\d+)/i)
+  return match ? match[1] : null
+}
+
+function compareVersions(a, b) {
+  const av = String(a || '').split('.').map(part => Number.parseInt(part, 10)).map(n => Number.isFinite(n) ? n : 0)
+  const bv = String(b || '').split('.').map(part => Number.parseInt(part, 10)).map(n => Number.isFinite(n) ? n : 0)
+  const max = Math.max(av.length, bv.length)
+  for (let i = 0; i < max; i++) {
+    const diff = (av[i] || 0) - (bv[i] || 0)
+    if (diff !== 0) return diff > 0 ? 1 : -1
+  }
+  return 0
+}
+
+function openclawRuntimeStatus() {
+  const startedAt = Date.now()
+  let installedVersion = null
+  try {
+    installedVersion = parseOpenclawVersion(execFileSync('openclaw', ['--version'], { timeout: 1000 }).toString())
+  } catch {}
+  if (!installedVersion) {
+    return makeCheck(
+      'runtime.openclaw',
+      'OpenClaw runtime',
+      'warn',
+      'warn',
+      `Unable to detect OpenClaw runtime version; target is ${TARGET_OPENCLAW_VERSION}`,
+      startedAt,
+      { remediation: 'Run openclaw --version on the server and verify the global npm runtime path' }
+    )
+  }
+  const behind = compareVersions(installedVersion, TARGET_OPENCLAW_VERSION) < 0
+  return makeCheck(
+    'runtime.openclaw',
+    'OpenClaw runtime',
+    behind ? 'warn' : 'ok',
+    'warn',
+    behind
+      ? `Installed ${installedVersion}; target ${TARGET_OPENCLAW_VERSION}`
+      : `Installed ${installedVersion}`,
+    startedAt,
+    { remediation: behind ? `Update runtime to openclaw@${TARGET_OPENCLAW_VERSION} after source/build verification` : undefined }
+  )
+}
+
+function nodeRuntimeStatus() {
+  const startedAt = Date.now()
+  const current = process.version.replace(/^v/, '')
+  const tooOld = compareVersions(current, MIN_NODE_VERSION) < 0
+  return makeCheck(
+    'runtime.node',
+    'Node.js runtime',
+    tooOld ? 'warn' : 'ok',
+    'warn',
+    tooOld ? `Node ${process.version}; target >=${MIN_NODE_VERSION}` : `Node ${process.version}`,
+    startedAt,
+    { remediation: tooOld ? `Install Node >=${MIN_NODE_VERSION} before upgrading OpenClaw runtime` : undefined }
+  )
+}
+
 function releaseState() {
-  const distDir = '/usr/lib/node_modules/openclaw/dist'
+  const distDirCandidates = [
+    '/usr/lib/node_modules/openclaw/dist',
+    path.join(HOME, '.npm-global/lib/node_modules/openclaw/dist'),
+  ]
+  const distDir = distDirCandidates.find(dir => {
+    try { return fs.existsSync(dir) } catch { return false }
+  }) || distDirCandidates[0]
   let distEntryNames = []
   try {
     distEntryNames = fs.readdirSync(distDir)
@@ -367,6 +437,8 @@ async function buildHealth() {
 
   const hooksPort = config.gateway?.hooksPort || 18789
   checks.push(releaseMetadataStatus())
+  checks.push(openclawRuntimeStatus())
+  checks.push(nodeRuntimeStatus())
 
   const gatewayStart = Date.now()
   try {
@@ -611,18 +683,22 @@ function finishHealth(checks, agents) {
   }
 }
 
+async function getHealth({ refresh = false } = {}) {
+  if (!refresh && healthCache && Date.now() - healthCache.createdAt < HEALTH_TTL_MS) {
+    return {
+      ...healthCache.data,
+      cache: { hit: true, ttlSeconds: Math.ceil((HEALTH_TTL_MS - (Date.now() - healthCache.createdAt)) / 1000) },
+    }
+  }
+  const data = await buildHealth()
+  healthCache = { createdAt: Date.now(), data }
+  return data
+}
+
 router.get('/health', async (req, res) => {
   try {
     const refresh = req.query.refresh === 'true'
-    if (!refresh && healthCache && Date.now() - healthCache.createdAt < HEALTH_TTL_MS) {
-      return res.json({
-        ...healthCache.data,
-        cache: { hit: true, ttlSeconds: Math.ceil((HEALTH_TTL_MS - (Date.now() - healthCache.createdAt)) / 1000) },
-      })
-    }
-    const data = await buildHealth()
-    healthCache = { createdAt: Date.now(), data }
-    res.json(data)
+    res.json(await getHealth({ refresh }))
   } catch (e) {
     res.status(200).json({
       ok: false,
@@ -697,3 +773,13 @@ router.get('/support-bundle', async (req, res) => {
 })
 
 module.exports = router
+module.exports._internal = {
+  buildHealth,
+  getHealth,
+  releaseState,
+  releaseMetadataStatus,
+  redact,
+  sanitizeError,
+  compareVersions,
+  parseOpenclawVersion,
+}

@@ -300,7 +300,25 @@ function parseReachableTelegramCount(health, configured) {
 
 function summarizeLatency(latency, conversations) {
   const byStatus = latency?.summary?.byStatus || {}
-  const routeBreakdown = conversations?.summary?.byRoute || {}
+  const conversationRoutes = conversations?.summary?.byRoute || {}
+  const latencyRoutes = {}
+  for (const turn of latency?.turns || []) {
+    const rootCause = String(turn.rootCause || '')
+    const route = rootCause === 'tool_path_used'
+      ? 'tool_path'
+      : rootCause === 'stock_price_denial'
+        ? 'capability_denied'
+        : rootCause === 'native_command'
+          ? 'native'
+          : rootCause === 'queue_coalesced'
+            ? 'queue_coalesced'
+            : (rootCause === 'completed' || rootCause === 'model_latency')
+              ? 'model_path'
+              : (turn.guardrail || rootCause || 'unknown')
+    latencyRoutes[route] = (latencyRoutes[route] || 0) + 1
+  }
+  const conversationRouteCount = Object.values(conversationRoutes).reduce((sum, count) => sum + Number(count || 0), 0)
+  const routeBreakdown = (latency?.summary?.count || 0) > conversationRouteCount ? latencyRoutes : conversationRoutes
   const active = (byStatus.pending || 0) + (byStatus.slow || 0)
   return {
     windowMinutes: latency?.windowMinutes || 0,
@@ -424,8 +442,8 @@ async function buildDashboardOverview({ refresh = false } = {}) {
   const telegramConfigured = countTelegramAccounts(config)
   const healthSummary = summarizeHealth(health, release.warnings)
   const costSummary = summarizeCost(cost)
-  const routeBreakdown = conversations.summary.byRoute || {}
-  const toolOnlyTurns = Object.entries(routeBreakdown)
+  const latencySummary = summarizeLatency(latency, conversations)
+  const toolOnlyTurns = Object.entries(latencySummary.routeBreakdown)
     .filter(([route]) => route !== 'model_path')
     .reduce((sum, [, count]) => sum + Number(count || 0), 0)
 
@@ -445,7 +463,7 @@ async function buildDashboardOverview({ refresh = false } = {}) {
       members: membersCount.status === 'fulfilled' ? membersCount.value : null,
       defaultModel: config.agents?.defaults?.model?.primary || null,
     },
-    latency: summarizeLatency(latency, conversations),
+    latency: latencySummary,
     cost: {
       ...costSummary,
       toolOnlyTurns,
@@ -501,4 +519,5 @@ module.exports._internal = {
   parseOpenclawVersion,
   summarizeCost,
   summarizeHealth,
+  summarizeLatency,
 }

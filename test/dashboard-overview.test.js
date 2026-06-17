@@ -52,3 +52,36 @@ test('dashboard cost summary counts model calls separately from deterministic to
   assert.equal(summary.outputTokens, 600)
   assert.equal(summary.byAgent[0].agentId, 'sale')
 })
+
+test('dashboard redaction keeps usage token metrics while redacting credentials', () => {
+  const { _internal: system } = require('../routes/system')
+  const data = system.redact({
+    inputTokens: 123,
+    outputTokens: 45,
+    botToken: 'bot123456:secret',
+    OPENROUTER_API_KEY: 'sk-or-secret',
+    sessionKey: 'agent:stock:telegram:123',
+  })
+
+  assert.equal(data.inputTokens, 123)
+  assert.equal(data.outputTokens, 45)
+  assert.equal(data.botToken, '<redacted>')
+  assert.equal(data.OPENROUTER_API_KEY, '<redacted>')
+  assert.equal(data.sessionKey, 'agent:stock:telegram:123')
+})
+
+test('dashboard latency route breakdown prefers full latency window over sparse recent conversations', () => {
+  const summary = _internal.summarizeLatency({
+    windowMinutes: 60,
+    summary: { count: 3, byStatus: { ok: 3 }, finalP50Ms: 1000, finalP95Ms: 2000 },
+    turns: [
+      { rootCause: 'tool_path_used' },
+      { rootCause: 'model_latency' },
+      { rootCause: 'completed' },
+    ],
+  }, {
+    summary: { byRoute: { native: 1 } },
+  })
+
+  assert.deepEqual(summary.routeBreakdown, { tool_path: 1, model_path: 2 })
+})

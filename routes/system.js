@@ -54,12 +54,22 @@ function sanitizeError(e) {
     .slice(0, 240)
 }
 
+function isSecretKey(key) {
+  const normalized = String(key || '').replace(/[^a-z0-9]/gi, '').toLowerCase()
+  if (!normalized) return false
+  if (['authorization', 'password', 'passwd', 'secret', 'token', 'key'].includes(normalized)) return true
+  if (normalized.endsWith('secret')) return true
+  if (normalized.endsWith('token') && !normalized.endsWith('tokens')) return true
+  if (normalized.endsWith('apikey') || normalized.endsWith('privatekey')) return true
+  return false
+}
+
 function redact(value) {
   if (Array.isArray(value)) return value.map(redact)
   if (!value || typeof value !== 'object') return value
   const out = {}
   for (const [key, item] of Object.entries(value)) {
-    if (/token|secret|key|authorization|password/i.test(key)) {
+    if (isSecretKey(key)) {
       out[key] = item ? '<redacted>' : item
     } else {
       out[key] = redact(item)
@@ -780,6 +790,7 @@ module.exports._internal = {
   releaseMetadataStatus,
   redact,
   sanitizeError,
+  isSecretKey,
   compareVersions,
   parseOpenclawVersion,
 }

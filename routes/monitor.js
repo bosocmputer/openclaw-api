@@ -18,6 +18,7 @@ const MAX_SESSIONS_PER_AGENT = 300
 const MAX_CONVERSATION_LINES = 220
 const MAX_CONVERSATION_SESSIONS_PER_AGENT = 120
 const MAX_CONVERSATION_TEXT = 1200
+const MAX_MONITOR_TOOL_TEXT = 5000
 const MAX_GATEWAY_MONITOR_TURNS = 80
 const DEFAULT_GATEWAY_LOG_DIR = '/tmp/openclaw'
 
@@ -101,6 +102,16 @@ function decodeMonitorText(value) {
   try {
     const text = Buffer.from(raw, 'base64url').toString('utf8')
     return text.replace(/\s+/g, ' ').trim().slice(0, MAX_CONVERSATION_TEXT)
+  } catch {
+    return ''
+  }
+}
+
+function decodeMonitorToolText(value) {
+  const raw = String(value || '')
+  if (!raw || raw === '-') return ''
+  try {
+    return Buffer.from(raw, 'base64url').toString('utf8').slice(0, MAX_MONITOR_TOOL_TEXT)
   } catch {
     return ''
   }
@@ -245,9 +256,9 @@ function parseSessionChannelUser(key) {
   return null
 }
 
-function buildConversationTurnsFromGatewayLog({ minutes, agent, channel, limit }) {
+function buildConversationTurnsFromGatewayLog({ minutes, agent, channel, limit, logFile }) {
   if (channel && channel !== 'telegram') return []
-  const latestLog = latestGatewayLogFile()
+  const latestLog = logFile || latestGatewayLogFile()
   if (!latestLog) return []
   const cutoffMs = Date.now() - minutes * 60 * 1000
   const turns = []
@@ -257,9 +268,27 @@ function buildConversationTurnsFromGatewayLog({ minutes, agent, channel, limit }
   } catch {
     return []
   }
+  const toolDetailsByTurn = new Map()
   for (const line of lines) {
     const parsed = parseGatewayLogLine(line)
     if (parsed.timeMs && parsed.timeMs < cutoffMs) continue
+    if (parsed.message.includes('telegram_monitor_tool')) {
+      const kv = parseGatewayKeyValues(parsed.message)
+      if (agent && kv.agent !== agent) continue
+      if (!kv.turnId || !kv.tool) continue
+      const detail = {
+        name: kv.tool,
+        status: kv.status || 'ok',
+        durationMs: Number(kv.durationMs || 0) || null,
+        toolInput: decodeMonitorToolText(kv.inputB64),
+        toolResult: decodeMonitorToolText(kv.resultB64),
+        cleanKeyword: decodeMonitorToolText(kv.cleanKeywordB64),
+        warning: kv.warning && kv.warning !== '-' ? kv.warning : null,
+      }
+      if (!toolDetailsByTurn.has(kv.turnId)) toolDetailsByTurn.set(kv.turnId, [])
+      toolDetailsByTurn.get(kv.turnId).push(detail)
+      continue
+    }
     if (parsed.message.includes('telegram native_command_fast_path')) {
       const kv = parseGatewayKeyValues(parsed.message)
       const target = parseTelegramNativeTarget(kv.target)
@@ -290,6 +319,8 @@ function buildConversationTurnsFromGatewayLog({ minutes, agent, channel, limit }
     const kv = parseGatewayKeyValues(parsed.message)
     if (agent && kv.agent !== agent) continue
     const tools = kv.tools && kv.tools !== '-' ? String(kv.tools).split('->').filter(Boolean) : []
+    const toolDetails = kv.turnId ? (toolDetailsByTurn.get(kv.turnId) || []) : []
+    const usedToolDetails = new Set()
     turns.push({
       id: kv.turnId || `gateway:${parsed.timeRaw || turns.length}`,
       source: 'gateway',
@@ -306,11 +337,20 @@ function buildConversationTurnsFromGatewayLog({ minutes, agent, channel, limit }
       durationMs: Number(kv.durationMs || 0) || null,
       ackMs: null,
       modelMs: null,
-      toolPath: tools.map(name => ({
-        name,
-        status: 'ok',
-        durationMs: name.includes('search') ? Number(kv.searchMs || 0) || null : name.includes('balance') ? Number(kv.balanceMs || 0) || null : null,
-      })),
+      toolPath: tools.map(name => {
+        const detailIndex = toolDetails.findIndex((detail, index) => !usedToolDetails.has(index) && detail.name === name)
+        const detail = detailIndex >= 0 ? toolDetails[detailIndex] : null
+        if (detailIndex >= 0) usedToolDetails.add(detailIndex)
+        return {
+          name,
+          status: detail?.status || 'ok',
+          durationMs: detail?.durationMs ?? (name.includes('search') ? Number(kv.searchMs || 0) || null : name.includes('balance') ? Number(kv.balanceMs || 0) || null : null),
+          toolInput: detail?.toolInput || undefined,
+          toolResult: detail?.toolResult || undefined,
+          cleanKeyword: detail?.cleanKeyword || undefined,
+          warning: detail?.warning || undefined,
+        }
+      }),
       warnings: [],
     })
   }
@@ -400,6 +440,11 @@ function buildGatewayMonitorSessions({ seenModelTexts } = {}) {
         type: 'tool',
         text: `${tool.name}${tool.durationMs != null ? ` ${tool.durationMs}ms` : ''}`,
         toolName: tool.name,
+        toolInput: tool.toolInput,
+        toolResult: tool.toolResult,
+        cleanKeyword: tool.cleanKeyword,
+        intent: turn.intent,
+        route: turn.route,
         ...(toolDurationSec != null ? { latency: toolDurationSec } : {}),
       })
     }
@@ -442,6 +487,12 @@ function buildGatewayMonitorSessions({ seenModelTexts } = {}) {
         user: session.user,
         type: ev.type,
         text: ev.text,
+        toolName: ev.toolName,
+        toolInput: ev.toolInput,
+        toolResult: ev.toolResult,
+        cleanKeyword: ev.cleanKeyword,
+        intent: ev.intent,
+        route: ev.route,
       })
     }
   }
@@ -1216,6 +1267,12 @@ router.get('/events', async (req, res) => {
             user,
             type: ev.type,
             text: ev.text,
+            toolName: ev.toolName,
+            toolInput: ev.toolInput,
+            toolResult: ev.toolResult,
+            cleanKeyword: ev.cleanKeyword,
+            intent: ev.intent,
+            route: ev.route,
           })
         }
       }
@@ -1574,6 +1631,7 @@ module.exports = {
     extractToolResultText,
     normalizeUsageMetrics,
     normalizeTrajectoryEntries,
+    buildConversationTurnsFromGatewayLog,
     parseToolNotFound,
     resolveMonitorSessionSource,
     monitorEventTime,

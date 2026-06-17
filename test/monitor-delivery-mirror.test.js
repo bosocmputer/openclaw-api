@@ -1,5 +1,8 @@
 const assert = require('node:assert/strict')
 const test = require('node:test')
+const fs = require('node:fs')
+const os = require('node:os')
+const path = require('node:path')
 
 const { _internal } = require('../routes/monitor')
 
@@ -162,4 +165,35 @@ test('monitor events sort by full timestamp across days, not HH:mm:ss text', () 
   assert.equal(events[0].text, 'newer next day')
   assert.equal(events[1].text, 'older Bangkok night')
   assert.ok(_internal.monitorEventTimeMs(events[0]) > _internal.monitorEventTimeMs(events[1]))
+})
+
+test('gateway deterministic tool details are attached to conversation turns', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'openclaw-monitor-'))
+  const file = path.join(dir, 'gateway.log')
+  const b64 = value => Buffer.from(value, 'utf8').toString('base64url')
+  const lines = [
+    JSON.stringify({
+      time: '2026-06-17T10:45:45.000+07:00',
+      message: `telegram_monitor_tool agent=stock turnId=tg_1 channel=telegram route=tool_path intent=stock_balance tool=search_product status=ok durationMs=123 cleanKeywordB64=${b64('สินค้า')} inputB64=${b64('{"args":{"keyword":"สินค้า"}}')} resultB64=${b64('{"candidates":[{"code":"ITEM-001"}]}')} warning=-`,
+    }),
+    JSON.stringify({
+      time: '2026-06-17T10:45:46.000+07:00',
+      message: `telegram_monitor_turn agent=stock turnId=tg_1 channel=telegram route=tool_path intent=stock_balance status=sent durationMs=1500 tools=search_product searchMs=123 balanceMs=0 userTextB64=${b64('ขอเช็คยอดคงเหลือ สินค้า')} finalTextB64=${b64('พบสินค้า 1 รายการครับ')}`,
+    }),
+  ]
+  fs.writeFileSync(file, lines.join('\n'))
+
+  const turns = _internal.buildConversationTurnsFromGatewayLog({
+    minutes: 1440,
+    channel: 'telegram',
+    limit: 10,
+    logFile: file,
+  })
+
+  assert.equal(turns.length, 1)
+  assert.equal(turns[0].toolPath.length, 1)
+  assert.equal(turns[0].toolPath[0].name, 'search_product')
+  assert.equal(turns[0].toolPath[0].cleanKeyword, 'สินค้า')
+  assert.match(turns[0].toolPath[0].toolInput, /"keyword":"สินค้า"/)
+  assert.match(turns[0].toolPath[0].toolResult, /ITEM-001/)
 })

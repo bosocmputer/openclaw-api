@@ -120,7 +120,7 @@ openclaw-api/
     ├── agents.js         ← /api/agents/* (CRUD + soul + mcp + users)
     ├── telegram.js       ← /api/telegram/* (accounts, bindings, botinfo, pairing)
     ├── line.js           ← /api/line/* (accounts, bindings, botinfo, pairing)
-    ├── model.js          ← GET/PUT /api/model, GET /api/models, POST /api/models/test
+    ├── model.js          ← GET/PUT /api/model, GET /api/models/catalog, GET /api/models, POST /api/models/test
     ├── gateway.js        ← /api/gateway/*, /api/doctor/*, /api/usernames
     ├── members.js        ← /api/members/* (admin user CRUD, bcrypt, PostgreSQL)
     ├── webchat.js        ← /api/webchat/* (rooms, history, send+poll, PostgreSQL)
@@ -197,7 +197,8 @@ openclaw-api/
 | ------ | ---- | ----------- |
 | GET | `/api/model` | get primary model |
 | PUT | `/api/model` | set primary model |
-| GET | `/api/models?provider=X` | list models (openrouter/anthropic/google/openai/mistral/groq/kilocode) |
+| GET | `/api/models/catalog?provider=X&refresh=false` | rich live model catalog with status/cache/warnings |
+| GET | `/api/models?provider=X` | legacy model array response powered by catalog |
 | POST | `/api/models/test` | test API key validity |
 
 ### Gateway & Maintenance

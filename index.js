@@ -48,7 +48,7 @@ app.use('/api/auth',      require('./routes/auth'))
 app.use('/api/agents',    require('./routes/agents'))
 app.use('/api/telegram',  require('./routes/telegram'))
 app.use('/api/line',      require('./routes/line'))
-app.use('/api',           require('./routes/model'))       // mounts /api/model, /api/models, /api/models/test
+app.use('/api',           require('./routes/model'))       // mounts /api/model, /api/models/catalog, /api/models, /api/models/test
 app.use('/api/gateway',   gatewayRouter)
 app.use('/api/usernames', usernamesRouter)
 app.use('/api/doctor',    doctorRouter)

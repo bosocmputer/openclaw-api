@@ -1,5 +1,6 @@
 const router = require('express').Router()
 const { readOpenclawConfig, writeOpenclawConfigAtomic } = require('../lib/openclaw-config')
+const { getModelCatalog } = require('../lib/model-catalog')
 
 // GET /api/model — อ่าน model ปัจจุบัน
 router.get('/model', (req, res) => {
@@ -30,87 +31,32 @@ router.put('/model', (req, res) => {
   }
 })
 
-// GET /api/models?provider=openrouter|anthropic|google|openai|mistral|groq|kilocode
+// GET /api/models/catalog?provider=openrouter|anthropic|google|openai|mistral|groq|kilocode
+router.get('/models/catalog', async (req, res) => {
+  try {
+    const config = readOpenclawConfig()
+    const provider = req.query.provider || 'openrouter'
+    const refresh = req.query.refresh === 'true' || req.query.refresh === '1'
+    const catalog = await getModelCatalog({ provider, config, refresh })
+    const httpStatus = catalog.status === 'unknown_provider' ? 400 : 200
+    res.status(httpStatus).json(catalog)
+  } catch (e) {
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// GET /api/models?provider=X — legacy array response for existing Admin callers
 router.get('/models', async (req, res) => {
   try {
     const config = readOpenclawConfig()
     const provider = req.query.provider || 'openrouter'
-
-    if (provider === 'openrouter') {
-      const apiKey = config.env?.OPENROUTER_API_KEY || ''
-      const response = await fetch('https://openrouter.ai/api/v1/models', {
-        headers: { 'Authorization': `Bearer ${apiKey}` }
-      })
-      const data = await response.json()
-      const models = (data.data || []).map(m => ({ id: m.id, name: m.name, pricing: m.pricing }))
-      return res.json(models)
-    }
-
-    if (provider === 'anthropic') {
-      const apiKey = config.env?.ANTHROPIC_API_KEY || ''
-      const response = await fetch('https://api.anthropic.com/v1/models', {
-        headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' }
-      })
-      const data = await response.json()
-      const models = (data.data || []).map(m => ({ id: m.id, name: m.display_name || m.id }))
-      return res.json(models)
-    }
-
-    if (provider === 'google') {
-      const apiKey = config.env?.GEMINI_API_KEY || ''
-      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`)
-      const data = await response.json()
-      const models = (data.models || [])
-        .filter(m => m.supportedGenerationMethods?.includes('generateContent'))
-        .map(m => ({ id: m.name.replace('models/', ''), name: m.displayName || m.name }))
-      return res.json(models)
-    }
-
-    if (provider === 'openai') {
-      const apiKey = config.env?.OPENAI_API_KEY || ''
-      const response = await fetch('https://api.openai.com/v1/models', {
-        headers: { 'Authorization': `Bearer ${apiKey}` }
-      })
-      const data = await response.json()
-      const models = (data.data || [])
-        .filter(m => m.id.startsWith('gpt-') || m.id.startsWith('o1') || m.id.startsWith('o3'))
-        .sort((a, b) => b.created - a.created)
-        .map(m => ({ id: m.id, name: m.id }))
-      return res.json(models)
-    }
-
-    if (provider === 'mistral') {
-      const apiKey = config.env?.MISTRAL_API_KEY || ''
-      const response = await fetch('https://api.mistral.ai/v1/models', {
-        headers: { 'Authorization': `Bearer ${apiKey}` }
-      })
-      const data = await response.json()
-      const models = (data.data || []).map(m => ({ id: m.id, name: m.id }))
-      return res.json(models)
-    }
-
-    if (provider === 'groq') {
-      const apiKey = config.env?.GROQ_API_KEY || ''
-      const response = await fetch('https://api.groq.com/openai/v1/models', {
-        headers: { 'Authorization': `Bearer ${apiKey}` }
-      })
-      const data = await response.json()
-      const models = (data.data || []).map(m => ({ id: m.id, name: m.id }))
-      return res.json(models)
-    }
-
-    if (provider === 'kilocode') {
-      const apiKey = config.env?.KILOCODE_API_KEY || ''
-      const response = await fetch('https://api.kilo.ai/api/gateway/models', {
-        headers: { 'Authorization': `Bearer ${apiKey}` }
-      })
-      const data = await response.json()
-      const items = data.data || data.models || data || []
-      const models = items.map(m => ({ id: m.id || m.slug, name: m.name || m.id || m.slug }))
-      return res.json(models)
-    }
-
-    res.status(400).json({ error: `Unknown provider: ${provider}` })
+    const refresh = req.query.refresh === 'true' || req.query.refresh === '1'
+    const catalog = await getModelCatalog({ provider, config, refresh })
+    if (catalog.status === 'unknown_provider') return res.status(400).json({ error: catalog.summary })
+    res.setHeader('X-Model-Catalog-Status', catalog.status)
+    res.setHeader('X-Model-Catalog-Source', catalog.source)
+    res.json(catalog.models || [])
   } catch (e) {
     console.error('[openclaw-api]', req.method, req.path, e.message)
     res.status(500).json({ error: 'Internal server error' })

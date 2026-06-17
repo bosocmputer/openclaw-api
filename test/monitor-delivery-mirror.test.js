@@ -142,3 +142,24 @@ test('trajectory snapshots normalize to session messages with usage', () => {
     { input: 1234, output: 56, totalTokens: 1290, cost: 0.0007 }
   )
 })
+
+test('monitor events sort by full timestamp across days, not HH:mm:ss text', () => {
+  const events = [
+    {
+      ts: '23:59:59',
+      timestamp: '2026-06-16T16:59:59.000Z',
+      text: 'older Bangkok night',
+    },
+    {
+      ts: '00:00:01',
+      timestamp: '2026-06-17T17:00:01.000Z',
+      text: 'newer next day',
+    },
+  ]
+
+  _internal.sortMonitorEventsDesc(events)
+
+  assert.equal(events[0].text, 'newer next day')
+  assert.equal(events[1].text, 'older Bangkok night')
+  assert.ok(_internal.monitorEventTimeMs(events[0]) > _internal.monitorEventTimeMs(events[1]))
+})

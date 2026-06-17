@@ -322,6 +322,39 @@ function timePartFromMs(ms) {
   return new Date(ms).toISOString().slice(11, 19)
 }
 
+function monitorEventTime(ms) {
+  if (!Number.isFinite(ms)) {
+    return { ts: null, timestamp: null, timeMs: null }
+  }
+  return {
+    ts: timePartFromMs(ms),
+    timestamp: new Date(ms).toISOString(),
+    timeMs: ms,
+  }
+}
+
+function monitorEventTimeMs(event) {
+  if (!event || typeof event !== 'object') return 0
+  if (typeof event.timeMs === 'number' && Number.isFinite(event.timeMs)) return event.timeMs
+  if (typeof event.timestamp === 'string') {
+    const parsed = new Date(event.timestamp).getTime()
+    if (Number.isFinite(parsed)) return parsed
+  }
+  if (typeof event.startedAt === 'string') {
+    const parsed = new Date(event.startedAt).getTime()
+    if (Number.isFinite(parsed)) return parsed
+  }
+  return 0
+}
+
+function sortMonitorEventsDesc(events) {
+  return events.sort((a, b) => {
+    const byTime = monitorEventTimeMs(b) - monitorEventTimeMs(a)
+    if (byTime !== 0) return byTime
+    return String(b.ts || '').localeCompare(String(a.ts || ''))
+  })
+}
+
 function buildGatewayMonitorSessions({ seenModelTexts } = {}) {
   const turns = buildConversationTurnsFromGatewayLog({
     minutes: 180,
@@ -347,12 +380,14 @@ function buildGatewayMonitorSessions({ seenModelTexts } = {}) {
     const endMs = new Date(turn.startedAt).getTime()
     const durationMs = Number(turn.durationMs || 0)
     const startMs = Number.isFinite(endMs) && durationMs > 0 ? endMs - durationMs : endMs
-    const startTs = timePartFromMs(startMs) || timePartFromMs(endMs)
-    const endTs = timePartFromMs(endMs) || startTs
+    const startMeta = monitorEventTime(startMs)
+    const endMeta = monitorEventTime(endMs)
+    const startTs = startMeta.ts || endMeta.ts
+    const endTs = endMeta.ts || startTs
     const latencySec = durationMs > 0 ? Math.round(durationMs / 100) / 10 : undefined
     const events = []
     if (userText) {
-      events.push({ ts: startTs, type: 'message', text: userText })
+      events.push({ ...startMeta, ts: startTs, type: 'message', text: userText })
       if (Number.isFinite(startMs) && new Date(startMs).toISOString().slice(0, 10) === today) {
         stats.messages += 1
       }
@@ -360,6 +395,7 @@ function buildGatewayMonitorSessions({ seenModelTexts } = {}) {
     for (const tool of turn.toolPath || []) {
       const toolDurationSec = tool.durationMs != null ? Math.round(tool.durationMs / 100) / 10 : undefined
       events.push({
+        ...endMeta,
         ts: endTs,
         type: 'tool',
         text: `${tool.name}${tool.durationMs != null ? ` ${tool.durationMs}ms` : ''}`,
@@ -369,6 +405,7 @@ function buildGatewayMonitorSessions({ seenModelTexts } = {}) {
     }
     if (finalText) {
       events.push({
+        ...endMeta,
         ts: endTs,
         type: turn.status === 'ok' ? 'reply' : 'error',
         text: finalText,
@@ -398,6 +435,8 @@ function buildGatewayMonitorSessions({ seenModelTexts } = {}) {
     for (const ev of events) {
       globalEvents.push({
         ts: ev.ts,
+        timestamp: ev.timestamp,
+        timeMs: ev.timeMs,
         agentId: turn.agentId,
         channel: 'telegram',
         user: session.user,
@@ -1003,10 +1042,12 @@ router.get('/events', async (req, res) => {
         let lastUserTsMs = null
         for (const msg of filtered) {
           const msgTs = msg.timestamp || msg.ts
-          const tsFormatted = msgTs ? new Date(msgTs).toISOString().slice(11, 19) : null
+          const msgTimeMs = msgTs ? new Date(msgTs).getTime() : null
+          const msgTime = monitorEventTime(msgTimeMs)
+          const tsFormatted = msgTime.ts
           const usage = msg.usage
           if (msg.role === 'user') {
-            lastUserTsMs = msgTs ? new Date(msgTs).getTime() : null
+            lastUserTsMs = msgTime.timeMs
             const c = msg.content
             let text = ''
             if (typeof c === 'string') text = stripGatewayMetadata(c)
@@ -1014,7 +1055,7 @@ router.get('/events', async (req, res) => {
               const t = c.find(x => x.type === 'text')
               if (t) text = stripGatewayMetadata(t.text)
             }
-            if (text) events.push({ ts: tsFormatted, type: 'message', text })
+            if (text) events.push({ ...msgTime, ts: tsFormatted, type: 'message', text })
             if (channel === 'telegram' && text) {
               seenModelTexts.add(`${agentId}|${safeSnippet(text, 600)}`)
             }
@@ -1023,6 +1064,7 @@ router.get('/events', async (req, res) => {
             if (modelError) {
               modelWarnings.push(modelError)
               events.push({
+                ...msgTime,
                 ts: tsFormatted,
                 type: 'error',
                 category: modelError.type,
@@ -1044,21 +1086,22 @@ router.get('/events', async (req, res) => {
             if (Array.isArray(c)) {
               for (const item of c) {
                 if (item.type === 'thinking') {
-                  events.push(attachUsageToEvent({ ts: tsFormatted, type: 'thinking', text: (item.thinking || '') }))
+                  events.push(attachUsageToEvent({ ...msgTime, ts: tsFormatted, type: 'thinking', text: (item.thinking || '') }))
                 } else if (item.type === 'tool_use' || item.type === 'toolCall') {
                   const toolName = item.name || ''
                   if (toolName) toolChain.push(toolName)
                   const toolText = toolName + (item.input ? ': ' + JSON.stringify(item.input, null, 2) : '')
-                  events.push(attachUsageToEvent({ ts: tsFormatted, type: 'tool', text: toolText, toolName }))
+                  events.push(attachUsageToEvent({ ...msgTime, ts: tsFormatted, type: 'tool', text: toolText, toolName }))
                 } else if (item.type === 'text' && item.text) {
                   const lower = item.text.toLowerCase()
                   if (lower.includes('bash') || lower.includes('exec')) {
-                    events.push(attachUsageToEvent({ ts: tsFormatted, type: 'tool', text: item.text }))
+                    events.push(attachUsageToEvent({ ...msgTime, ts: tsFormatted, type: 'tool', text: item.text }))
                   } else {
                     const quality = detectReplyQualityWarnings(item.text)
                     for (const warning of quality) {
                       replyQualityWarnings.push(warning)
                       events.push({
+                        ...msgTime,
                         ts: tsFormatted,
                         type: 'warning',
                         category: warning.type,
@@ -1066,9 +1109,9 @@ router.get('/events', async (req, res) => {
                         text: warning.summary,
                       })
                     }
-                    const ev = { ts: tsFormatted, type: 'reply', text: item.text }
-                    if (lastUserTsMs && msgTs) {
-                      const diff = (new Date(msgTs).getTime() - lastUserTsMs) / 1000
+                    const ev = { ...msgTime, ts: tsFormatted, type: 'reply', text: item.text }
+                    if (lastUserTsMs && msgTime.timeMs) {
+                      const diff = (msgTime.timeMs - lastUserTsMs) / 1000
                       if (diff > 0 && diff < 3600) ev.latency = Math.round(diff * 10) / 10
                     }
                     attachUsageToEvent(ev)
@@ -1076,7 +1119,7 @@ router.get('/events', async (req, res) => {
                     lastUserTsMs = null
                   }
                 } else if (item.type === 'error') {
-                  events.push({ ts: tsFormatted, type: 'error', text: (item.text || JSON.stringify(item, null, 2)).slice(0, 5000) })
+                  events.push({ ...msgTime, ts: tsFormatted, type: 'error', text: (item.text || JSON.stringify(item, null, 2)).slice(0, 5000) })
                 }
               }
             } else if (typeof c === 'string') {
@@ -1084,6 +1127,7 @@ router.get('/events', async (req, res) => {
               for (const warning of quality) {
                 replyQualityWarnings.push(warning)
                 events.push({
+                  ...msgTime,
                   ts: tsFormatted,
                   type: 'warning',
                   category: warning.type,
@@ -1091,9 +1135,9 @@ router.get('/events', async (req, res) => {
                   text: warning.summary,
                 })
               }
-              const ev = { ts: tsFormatted, type: 'reply', text: c }
-              if (lastUserTsMs && msgTs) {
-                const diff = (new Date(msgTs).getTime() - lastUserTsMs) / 1000
+              const ev = { ...msgTime, ts: tsFormatted, type: 'reply', text: c }
+              if (lastUserTsMs && msgTime.timeMs) {
+                const diff = (msgTime.timeMs - lastUserTsMs) / 1000
                 if (diff > 0 && diff < 3600) ev.latency = Math.round(diff * 10) / 10
               }
               attachUsageToEvent(ev)
@@ -1117,7 +1161,7 @@ router.get('/events', async (req, res) => {
                 }
               }
               if (missingTool && !paired) {
-                events.push({ ts: tsFormatted, type: 'warning', text: `Tool ${missingTool} not found`, toolName: missingTool, toolResult: text.slice(0, 3000) })
+                events.push({ ...msgTime, ts: tsFormatted, type: 'warning', text: `Tool ${missingTool} not found`, toolName: missingTool, toolResult: text.slice(0, 3000) })
               }
             }
           }
@@ -1125,8 +1169,11 @@ router.get('/events', async (req, res) => {
 
         const toolWarnings = summarizeToolLoopWarnings(toolNotFoundCounts)
         for (const warning of toolWarnings) {
+          const lastEvent = events.at(-1) || {}
           events.push({
-            ts: events.at(-1)?.ts || null,
+            ts: lastEvent.ts || null,
+            timestamp: lastEvent.timestamp || null,
+            timeMs: lastEvent.timeMs ?? null,
             type: 'warning',
             text: warning.summary,
             toolName: warning.toolName,
@@ -1160,7 +1207,16 @@ router.get('/events', async (req, res) => {
 
         // Add to globalEvents
         for (const ev of events) {
-          globalEvents.push({ ts: ev.ts, agentId, channel, user, type: ev.type, text: ev.text })
+          globalEvents.push({
+            ts: ev.ts,
+            timestamp: ev.timestamp,
+            timeMs: ev.timeMs,
+            agentId,
+            channel,
+            user,
+            type: ev.type,
+            text: ev.text,
+          })
         }
       }
 
@@ -1179,8 +1235,8 @@ router.get('/events', async (req, res) => {
     errors += gatewayMonitor.stats.errors
     responseTimes.push(...gatewayMonitor.stats.responseTimes)
 
-    // Sort globalEvents by ts descending and limit to last 50
-    globalEvents.sort((a, b) => (b.ts || '').localeCompare(a.ts || ''))
+    // Sort by full timestamp, not only HH:mm:ss, so cross-day logs stay in order.
+    sortMonitorEventsDesc(globalEvents)
     const limitedGlobalEvents = globalEvents.slice(0, 50)
 
     // Read gateway log from /tmp/openclaw/ — latest file, last 100 lines
@@ -1200,10 +1256,11 @@ router.get('/events', async (req, res) => {
             const obj = JSON.parse(line)
             const subsystem = typeof obj['0'] === 'string' ? (() => { try { return JSON.parse(obj['0']) } catch { return obj['0'] } })() : obj['0']
             const message = obj['1'] || obj.message || ''
-            const ts = obj.time ? new Date(obj.time).toISOString().slice(11, 19) : null
-            gatewayEvents.push({ ts, subsystem, message })
+            const timeMs = obj.time ? new Date(obj.time).getTime() : null
+            gatewayEvents.push({ ...monitorEventTime(timeMs), subsystem, message })
           } catch { /* skip */ }
         }
+        sortMonitorEventsDesc(gatewayEvents)
       }
     } catch { /* skip if /tmp/openclaw doesn't exist */ }
 
@@ -1519,6 +1576,9 @@ module.exports = {
     normalizeTrajectoryEntries,
     parseToolNotFound,
     resolveMonitorSessionSource,
+    monitorEventTime,
+    monitorEventTimeMs,
+    sortMonitorEventsDesc,
     summarizeToolLoopWarnings,
   },
 }

@@ -4,8 +4,10 @@ const { readOpenclawConfig, writeOpenclawConfigAtomic, withConfigLock } = requir
 const { getModelCatalog } = require('../lib/model-catalog')
 const {
   applyModelSettings,
+  collectRuntimeVerificationIssues,
   getModelReadinessForConfig,
 } = require('../lib/model-readiness')
+const { runModelRuntimeTest } = require('../lib/model-runtime-test')
 
 const READINESS_TTL_MS = 30_000
 let readinessCache = null
@@ -91,14 +93,71 @@ router.get('/models/readiness', async (req, res) => {
   }
 })
 
+// POST /api/models/runtime-test — run a bounded OpenClaw runtime inference smoke for one model
+router.post('/models/runtime-test', async (req, res) => {
+  try {
+    const config = readOpenclawConfig()
+    const { model, capability = 'text', mode = 'gateway', refresh = false } = req.body || {}
+    if (!model || typeof model !== 'string') {
+      return res.status(400).json({
+        ok: false,
+        status: 'model_not_found',
+        error: 'model is required',
+        safeMessage: 'กรุณาเลือก model ก่อนทดสอบ',
+      })
+    }
+    if (!['text', 'image'].includes(String(capability))) {
+      return res.status(400).json({
+        ok: false,
+        status: 'provider_error',
+        error: 'capability must be text or image',
+      })
+    }
+    if (String(mode) !== 'gateway') {
+      return res.status(400).json({
+        ok: false,
+        status: 'provider_error',
+        error: 'only gateway runtime tests are supported',
+      })
+    }
+    const result = await runModelRuntimeTest({
+      model,
+      capability,
+      mode,
+      config,
+      refresh: Boolean(refresh),
+    })
+    res.json(result)
+  } catch (e) {
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({
+      ok: false,
+      status: 'runtime_unavailable',
+      error: 'Runtime test failed',
+      safeMessage: 'OpenClaw runtime หรือ gateway ยังไม่พร้อมสำหรับทดสอบ model',
+    })
+  }
+})
+
 // PUT /api/models/settings — validate and save primary/fallback/image model config
 router.put('/models/settings', async (req, res) => {
   try {
     const validateOnly = req.query.validateOnly === 'true' || req.query.validateOnly === '1'
+    const allowRuntimeOverride = req.query.allowRuntimeOverride === 'true'
+      || req.query.allowRuntimeOverride === '1'
+      || req.body?.allowRuntimeOverride === true
+    const actorRole = String(req.headers['x-openclaw-admin-role'] || '')
+    if (allowRuntimeOverride && actorRole !== 'superadmin') {
+      return res.status(403).json({
+        ok: false,
+        error: 'Runtime verification override requires superadmin',
+      })
+    }
     const result = await withConfigLock(async () => {
       const config = readOpenclawConfig()
       const nextConfig = applyModelSettings(config, req.body || {})
       const readiness = await getModelReadinessForConfig(nextConfig, { refresh: true })
+      const runtimeIssues = collectRuntimeVerificationIssues(readiness)
       const hash = configHash(nextConfig)
       const cachedReadiness = {
         ...readiness,
@@ -117,13 +176,37 @@ router.put('/models/settings', async (req, res) => {
         throw err
       }
 
-      if (validateOnly) {
-        return { ok: true, validateOnly: true, readiness: cachedReadiness }
+      if (runtimeIssues.length && !allowRuntimeOverride) {
+        const err = new Error('Runtime model tests must pass before saving')
+        err.statusCode = 400
+        err.payload = {
+          ok: false,
+          error: err.message,
+          blockingIssues: runtimeIssues,
+          readiness: cachedReadiness,
+        }
+        throw err
       }
 
-      const write = writeOpenclawConfigAtomic(nextConfig, { reason: 'model-settings' })
+      if (validateOnly) {
+        return {
+          ok: true,
+          validateOnly: true,
+          runtimeOverride: Boolean(runtimeIssues.length && allowRuntimeOverride),
+          readiness: cachedReadiness,
+        }
+      }
+
+      const write = writeOpenclawConfigAtomic(nextConfig, {
+        reason: allowRuntimeOverride && runtimeIssues.length ? 'model-settings-runtime-override' : 'model-settings',
+      })
       readinessCache = { hash, createdAt: Date.now(), data: cachedReadiness }
-      return { ok: true, write, readiness: cachedReadiness }
+      return {
+        ok: true,
+        runtimeOverride: Boolean(runtimeIssues.length && allowRuntimeOverride),
+        write,
+        readiness: cachedReadiness,
+      }
     })
     res.json(result)
   } catch (e) {

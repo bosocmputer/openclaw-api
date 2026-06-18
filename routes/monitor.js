@@ -752,6 +752,14 @@ function detectModelError(msg) {
     .join('\n')
   const stopReason = String(msg.stopReason || '').toLowerCase()
   if (stopReason !== 'error' && !text) return null
+  if (/unknown model|model_not_found|all models failed/i.test(text)) {
+    return {
+      type: 'model_not_found',
+      summary: 'Configured model is not recognized by the OpenClaw runtime',
+      detail: text.slice(0, 500),
+      remediation: 'Open /model, run a runtime test for the selected model, then save a verified model chain.',
+    }
+  }
   if (/timed out|timeout|finish_reason:\s*error|provider finish_reason:\s*error/i.test(text)) {
     return {
       type: 'model_timeout',

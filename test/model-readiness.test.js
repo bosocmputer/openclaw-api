@@ -5,6 +5,10 @@ const {
   applyModelSettings,
   getModelReadinessForConfig,
 } = require('../lib/model-readiness')
+const {
+  clearModelRuntimeTestCache,
+  runModelRuntimeTest,
+} = require('../lib/model-runtime-test')
 
 function readyCatalog(models) {
   return {
@@ -33,6 +37,7 @@ function catalogLoaderByProvider(catalogs) {
 }
 
 test('readiness passes when primary, fallback, and image models exist in live catalog', async () => {
+  clearModelRuntimeTestCache()
   const config = {
     agents: {
       defaults: {
@@ -65,9 +70,54 @@ test('readiness passes when primary, fallback, and image models exist in live ca
 
   assert.equal(readiness.ok, true)
   assert.equal(readiness.blockingIssues.length, 0)
+  assert.equal(readiness.runtimeVerificationIssues.length, 4)
   assert.equal(readiness.defaults.model.primary.status, 'ready')
+  assert.equal(readiness.defaults.model.primary.runtimeStatus, 'runtime_unverified')
   assert.equal(readiness.defaults.imageModel.primary.status, 'ready')
   assert.equal(readiness.agents[0].imageModel.primary.status, 'ready')
+})
+
+test('readiness marks runtime verified after a runtime test passes', async () => {
+  clearModelRuntimeTestCache()
+  const config = {
+    env: { OPENROUTER_API_KEY: 'sk-or-test' },
+    agents: {
+      defaults: {
+        model: { primary: 'openrouter/google/gemini-2.5-flash-lite', fallbacks: [] },
+      },
+      list: [],
+    },
+  }
+  const spawnImpl = (_command, args) => {
+    const { EventEmitter } = require('node:events')
+    const child = new EventEmitter()
+    child.stdout = new EventEmitter()
+    child.stderr = new EventEmitter()
+    child.kill = () => {}
+    process.nextTick(() => {
+      if (args.includes('--version')) child.stdout.emit('data', 'OpenClaw 2026.6.8 (test)\n')
+      else child.stdout.emit('data', JSON.stringify({ ok: true, outputs: [{ text: 'OPENCLAW_MODEL_TEST_OK' }] }))
+      child.emit('close', 0)
+    })
+    return child
+  }
+
+  await runModelRuntimeTest({
+    model: 'openrouter/google/gemini-2.5-flash-lite',
+    capability: 'text',
+    config,
+    spawnImpl,
+  })
+  const readiness = await getModelReadinessForConfig(config, {
+    getModelCatalog: catalogLoaderByProvider({
+      openrouter: readyCatalog([
+        { id: 'google/gemini-2.5-flash-lite', capabilities: { inputModalities: ['text'] } },
+      ]),
+    }),
+  })
+
+  assert.equal(readiness.defaults.model.primary.runtimeStatus, 'runtime_verified')
+  assert.equal(readiness.runtimeVerificationIssues.length, 0)
 })
 
 test('missing provider catalog key becomes a blocking issue for configured model refs', async () => {

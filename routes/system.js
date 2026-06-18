@@ -579,15 +579,19 @@ async function buildHealth() {
     checks.push(makeCheck(
       'model.readiness',
       'Model readiness',
-      modelReadiness.ok ? 'ok' : 'warn',
+      modelReadiness.ok && !modelReadiness.runtimeVerificationIssues?.length ? 'ok' : 'warn',
       'warn',
-      modelReadiness.ok
-        ? 'Primary, fallback, and image model settings validate against provider catalogs'
-        : `${modelReadiness.blockingIssues.length} model readiness issue(s) found`,
+      modelReadiness.ok && !modelReadiness.runtimeVerificationIssues?.length
+        ? 'Primary, fallback, image, and runtime model checks are ready'
+        : modelReadiness.blockingIssues.length
+          ? `${modelReadiness.blockingIssues.length} model readiness issue(s) found`
+          : `${modelReadiness.runtimeVerificationIssues.length} model(s) need runtime verification`,
       modelReadinessStart,
       {
         warnings: modelReadiness.warnings,
-        remediation: modelReadiness.ok ? undefined : 'Open /model, validate settings, save, then restart gateway',
+        remediation: modelReadiness.ok && !modelReadiness.runtimeVerificationIssues?.length
+          ? undefined
+          : 'Open /model, run runtime tests for selected models, validate settings, save, then restart gateway',
       }
     ))
   } catch (e) {

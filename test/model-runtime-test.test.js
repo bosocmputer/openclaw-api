@@ -66,12 +66,69 @@ test('runtime model test succeeds and is cached per model/key/runtime', async ()
   })
 
   assert.equal(first.ok, true)
-  assert.equal(first.status, 'ok')
+  assert.equal(first.status, 'runtime_verified')
+  assert.equal(first.expectedOutput, 'OPENCLAW_MODEL_TEST_OK')
+  assert.equal(first.outputPreview, 'OPENCLAW_MODEL_TEST_OK')
   assert.equal(second.cache.hit, true)
   assert.equal(inferCalls, 1)
 
   const cached = runtimeStatusForRef('openrouter/google/gemini-2.5-flash-lite', { capability: 'text', config })
   assert.equal(cached.runtimeStatus, 'runtime_verified')
+})
+
+test('runtime model test rejects provider error text emitted as successful output', async () => {
+  clearModelRuntimeTestCache()
+  const spawnImpl = spawnFor(args => {
+    if (args.includes('--version')) {
+      return { stdout: 'OpenClaw 2026.6.8 (test)\n' }
+    }
+    return {
+      stdout: JSON.stringify({
+        ok: true,
+        outputs: [{ text: 'LLM request failed.' }],
+      }),
+    }
+  })
+
+  const result = await runModelRuntimeTest({
+    model: 'kilocode/google/gemini-3.1-flash-lite',
+    capability: 'image',
+    config: { env: { KILOCODE_API_KEY: 'kc-test' } },
+    spawnImpl,
+  })
+
+  assert.equal(result.ok, false)
+  assert.equal(result.status, 'invalid_output')
+  assert.equal(result.failureReason, 'error_text_output')
+  assert.equal(result.expectedOutput, 'OPENCLAW_IMAGE_TEST_OK')
+  assert.match(result.safeMessage, /error/)
+})
+
+test('runtime model test requires the exact sentinel response', async () => {
+  clearModelRuntimeTestCache()
+  const spawnImpl = spawnFor(args => {
+    if (args.includes('--version')) {
+      return { stdout: 'OpenClaw 2026.6.8 (test)\n' }
+    }
+    return {
+      stdout: JSON.stringify({
+        ok: true,
+        outputs: [{ text: 'Sure, OPENCLAW_MODEL_TEST_OK' }],
+      }),
+    }
+  })
+
+  const result = await runModelRuntimeTest({
+    model: 'openrouter/google/gemini-2.5-flash-lite',
+    capability: 'text',
+    config: { env: { OPENROUTER_API_KEY: 'sk-or-test' } },
+    spawnImpl,
+  })
+
+  assert.equal(result.ok, false)
+  assert.equal(result.status, 'invalid_output')
+  assert.equal(result.failureReason, 'unexpected_output')
+  assert.equal(result.outputPreview, 'Sure, OPENCLAW_MODEL_TEST_OK')
 })
 
 test('runtime model test maps OpenClaw unknown model errors to model_not_found', async () => {

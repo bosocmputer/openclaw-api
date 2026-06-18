@@ -120,6 +120,55 @@ test('readiness marks runtime verified after a runtime test passes', async () =>
   assert.equal(readiness.runtimeVerificationIssues.length, 0)
 })
 
+test('readiness reports invalid runtime output as a runtime verification issue', async () => {
+  clearModelRuntimeTestCache()
+  const config = {
+    env: { KILOCODE_API_KEY: 'kc-test' },
+    agents: {
+      defaults: {
+        model: { primary: 'kilocode/google/gemini-3.1-flash-lite', fallbacks: [] },
+      },
+      list: [],
+    },
+  }
+  const spawnImpl = (_command, args) => {
+    const { EventEmitter } = require('node:events')
+    const child = new EventEmitter()
+    child.stdout = new EventEmitter()
+    child.stderr = new EventEmitter()
+    child.kill = () => {}
+    process.nextTick(() => {
+      if (args.includes('--version')) child.stdout.emit('data', 'OpenClaw 2026.6.8 (test)\n')
+      else child.stdout.emit('data', JSON.stringify({ ok: true, outputs: [{ text: 'LLM request failed.' }] }))
+      child.emit('close', 0)
+    })
+    return child
+  }
+
+  await runModelRuntimeTest({
+    model: 'kilocode/google/gemini-3.1-flash-lite',
+    capability: 'text',
+    config,
+    spawnImpl,
+  })
+  const readiness = await getModelReadinessForConfig(config, {
+    getModelCatalog: catalogLoaderByProvider({
+      kilocode: {
+        ...readyCatalog([
+          { id: 'google/gemini-3.1-flash-lite', capabilities: { inputModalities: ['text'] } },
+        ]),
+        provider: 'kilocode',
+        warnings: ['Kilo runtime verification required'],
+      },
+    }),
+  })
+
+  assert.equal(readiness.defaults.model.primary.status, 'ready')
+  assert.equal(readiness.defaults.model.primary.runtimeStatus, 'invalid_output')
+  assert.equal(readiness.runtimeVerificationIssues.length, 1)
+  assert.equal(readiness.runtimeVerificationIssues[0].status, 'invalid_output')
+})
+
 test('missing provider catalog key becomes a blocking issue for configured model refs', async () => {
   const config = {
     agents: {

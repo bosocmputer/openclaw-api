@@ -760,6 +760,14 @@ function detectModelError(msg) {
       remediation: 'Open /model, run a runtime test for the selected model, then save a verified model chain.',
     }
   }
+  if (/invalid_output|llm request failed|runtime test returned unexpected|runtime test returned an error message/i.test(text)) {
+    return {
+      type: 'model_invalid_output',
+      summary: 'Model returned an invalid or provider-error response',
+      detail: text.slice(0, 500),
+      remediation: 'Open /model and choose a model that passes runtime verification.',
+    }
+  }
   if (/timed out|timeout|finish_reason:\s*error|provider finish_reason:\s*error/i.test(text)) {
     return {
       type: 'model_timeout',

@@ -187,3 +187,17 @@ test('kilo catalog accepts provider-specific models envelope', async () => {
   assert.equal(result.models[0].id, 'kilo-live/router')
   assert.equal(result.models[0].name, 'Kilo Router')
 })
+
+test('kilo catalog with key still warns that runtime verification is required', async () => {
+  clearModelCatalogCache()
+  const result = await getModelCatalog({
+    provider: 'kilocode',
+    config: { env: { KILOCODE_API_KEY: 'kc-test' } },
+    fetchImpl: async () => response({ body: { models: [{ slug: 'kilo-auto/small', display_name: 'Auto Small' }] } }),
+  })
+
+  assert.equal(result.status, 'ready')
+  assert.equal(result.models[0].id, 'kilo-auto/small')
+  assert.equal(result.warnings.length, 1)
+  assert.match(result.warnings[0], /runtime verification/)
+})

@@ -85,6 +85,68 @@ test('model timeout warnings are classified without leaking long payloads', () =
   assert.ok(warning.detail.length <= 500)
 })
 
+test('conversation turn is recovered when fallback succeeds after a model timeout', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'openclaw-monitor-session-'))
+  const file = path.join(dir, 'session.jsonl')
+  const lines = [
+    {
+      role: 'user',
+      timestamp: '2026-06-18T03:25:33.824Z',
+      content: 'ขอเช็คยอด TEST-001',
+    },
+    {
+      role: 'assistant',
+      timestamp: '2026-06-18T03:25:35.973Z',
+      stopReason: 'error',
+      errorMessage: 'LLM request timed out. rawError=Provider finish_reason: error',
+      content: [],
+    },
+    {
+      role: 'assistant',
+      timestamp: '2026-06-18T03:25:38.585Z',
+      content: [{ type: 'tool_use', name: 'stock__search_product', input: { keyword: 'TEST-001' } }],
+    },
+    {
+      role: 'toolResult',
+      timestamp: '2026-06-18T03:25:39.025Z',
+      content: '{"status":"resolved","selected":{"code":"TEST-001","name":"สินค้าทดสอบ"}}',
+    },
+    {
+      role: 'assistant',
+      timestamp: '2026-06-18T03:25:40.175Z',
+      content: [{ type: 'tool_use', name: 'stock__get_stock_balance', input: { code: 'TEST-001' } }],
+    },
+    {
+      role: 'toolResult',
+      timestamp: '2026-06-18T03:25:40.202Z',
+      content: '{"code":"TEST-001","found":0,"stocks":[]}',
+    },
+    {
+      role: 'assistant',
+      timestamp: '2026-06-18T03:25:40.940Z',
+      content: [{ type: 'text', text: 'ไม่พบยอดคงเหลือสินค้า TEST-001 ในคลังครับ' }],
+    },
+  ]
+  fs.writeFileSync(file, lines.map(line => JSON.stringify(line)).join('\n'))
+
+  const turns = _internal.buildConversationTurnsFromSession({
+    agentId: 'stock',
+    sessionKey: 'agent:stock:telegram:7548005041',
+    user: '7548005041',
+    channel: 'telegram',
+    sessionFile: file,
+    minutes: 1440,
+  })
+
+  assert.equal(turns.length, 1)
+  assert.equal(turns[0].status, 'ok')
+  assert.equal(turns[0].rootCause, 'model_timeout_recovered')
+  assert.equal(turns[0].finalText, 'ไม่พบยอดคงเหลือสินค้า TEST-001 ในคลังครับ')
+  assert.deepEqual(turns[0].toolPath.map(tool => tool.name), ['stock__search_product', 'stock__get_stock_balance'])
+  assert.ok(turns[0].warnings.some(w => w.type === 'model_timeout'))
+  assert.ok(turns[0].warnings.some(w => w.type === 'model_fallback_recovered'))
+})
+
 test('usage metrics normalize provider token and cost shapes', () => {
   assert.deepEqual(
     _internal.normalizeUsageMetrics({
@@ -114,6 +176,36 @@ test('usage metrics normalize provider token and cost shapes', () => {
   )
 
   assert.equal(_internal.normalizeUsageMetrics({ input: 0, output: 0, total: 0 }), null)
+})
+
+test('model metadata reports actual model or configured fallback source', () => {
+  assert.deepEqual(
+    _internal.messageModelMetadata(
+      { model: 'openrouter/google/gemini-2.5-flash-lite', provider: 'openrouter', stopReason: 'stop' },
+      'openrouter/qwen/qwen3.5-flash-02-23',
+      { input: 1, output: 1, totalTokens: 2, cost: 0.00001 }
+    ),
+    {
+      model: 'openrouter/google/gemini-2.5-flash-lite',
+      provider: 'openrouter',
+      modelSource: 'actual',
+      finishReason: 'stop',
+    }
+  )
+
+  assert.deepEqual(
+    _internal.messageModelMetadata(
+      { stopReason: 'stop' },
+      'openrouter/qwen/qwen3.5-flash-02-23',
+      { input: 1, output: 1, totalTokens: 2, cost: 0.00001 }
+    ),
+    {
+      model: 'openrouter/qwen/qwen3.5-flash-02-23',
+      provider: 'openrouter',
+      modelSource: 'configured',
+      finishReason: 'stop',
+    }
+  )
 })
 
 test('trajectory snapshots normalize to session messages with usage', () => {
@@ -171,13 +263,14 @@ test('gateway deterministic tool details are attached to conversation turns', ()
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'openclaw-monitor-'))
   const file = path.join(dir, 'gateway.log')
   const b64 = value => Buffer.from(value, 'utf8').toString('base64url')
+  const baseMs = Date.now() - 60_000
   const lines = [
     JSON.stringify({
-      time: '2026-06-17T10:45:45.000+07:00',
+      time: new Date(baseMs).toISOString(),
       message: `telegram_monitor_tool agent=stock turnId=tg_1 channel=telegram route=tool_path intent=stock_balance tool=search_product status=ok durationMs=123 cleanKeywordB64=${b64('สินค้า')} inputB64=${b64('{"args":{"keyword":"สินค้า"}}')} resultB64=${b64('{"candidates":[{"code":"ITEM-001"}]}')} warning=-`,
     }),
     JSON.stringify({
-      time: '2026-06-17T10:45:46.000+07:00',
+      time: new Date(baseMs + 1000).toISOString(),
       message: `telegram_monitor_turn agent=stock turnId=tg_1 channel=telegram route=tool_path intent=stock_balance status=sent durationMs=1500 tools=search_product searchMs=123 balanceMs=0 userTextB64=${b64('ขอเช็คยอดคงเหลือ สินค้า')} finalTextB64=${b64('พบสินค้า 1 รายการครับ')}`,
     }),
   ]

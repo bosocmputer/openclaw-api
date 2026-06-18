@@ -194,6 +194,46 @@ function normalizeUsageMetrics(usage) {
   return { input, output, totalTokens, cost: totalCost }
 }
 
+function providerFromModelRef(ref) {
+  const raw = String(ref || '')
+  const slash = raw.indexOf('/')
+  return slash > 0 ? raw.slice(0, slash) : null
+}
+
+function configuredModelForAgent(config, agent) {
+  const value = agent?.model || config?.agents?.defaults?.model
+  if (typeof value === 'string') return value || null
+  if (value && typeof value === 'object') return value.primary || null
+  return null
+}
+
+function messageModelMetadata(msg, configuredModelRef = null, usageMetrics = null) {
+  const actualModel = String(msg?.model || '').trim()
+  const actualProvider = String(msg?.provider || '').trim()
+  if (actualModel) {
+    return {
+      model: actualModel,
+      provider: actualProvider || providerFromModelRef(actualModel),
+      modelSource: 'actual',
+      finishReason: msg?.stopReason || msg?.finishReason || null,
+    }
+  }
+  if (usageMetrics && configuredModelRef) {
+    return {
+      model: configuredModelRef,
+      provider: providerFromModelRef(configuredModelRef),
+      modelSource: 'configured',
+      finishReason: msg?.stopReason || msg?.finishReason || null,
+    }
+  }
+  return {
+    model: null,
+    provider: actualProvider || null,
+    modelSource: null,
+    finishReason: msg?.stopReason || msg?.finishReason || null,
+  }
+}
+
 function resolveSessionArtifact(agentId, sessionId, explicitFile) {
   if (!sessionId && !explicitFile) return null
   const sessionFile = explicitFile
@@ -512,6 +552,28 @@ function buildConversationTurnsFromSession(params) {
   let current = null
   let lastTool = null
 
+  function isUserVisibleFailureText(text) {
+    return /something went wrong|ระบบประมวลผลไม่สำเร็จ|เกิดข้อผิดพลาด|ลองใหม่อีกครั้ง|try again/i.test(String(text || ''))
+  }
+
+  function markFinalText(text, tsMs) {
+    current.finalText = text
+    if (current.status === 'error' && /^model_/.test(String(current.rootCause || '')) && !isUserVisibleFailureText(text)) {
+      current.rootCause = `${current.rootCause}_recovered`
+      current.status = 'ok'
+      if (!current.warnings.some(w => w.type === 'model_fallback_recovered')) {
+        current.warnings.push({
+          type: 'model_fallback_recovered',
+          summary: 'Model/provider failed first, but fallback produced a final reply',
+        })
+      }
+    } else {
+      current.status = current.status === 'error' ? 'error' : 'ok'
+    }
+    if (tsMs && current.startedAtMs) current.durationMs = tsMs - current.startedAtMs
+    for (const warning of detectReplyQualityWarnings(text)) current.warnings.push(warning)
+  }
+
   function pushCurrent() {
     if (!current) return
     if (current.startedAtMs && current.startedAtMs < cutoffMs) {
@@ -585,18 +647,12 @@ function buildConversationTurnsFromSession(params) {
             lastTool = tool
           } else if (item.type === 'text' && item.text) {
             const text = safeSnippet(item.text)
-            current.finalText = text
-            current.status = current.status === 'error' ? 'error' : 'ok'
-            if (tsMs && current.startedAtMs) current.durationMs = tsMs - current.startedAtMs
-            for (const warning of detectReplyQualityWarnings(text)) current.warnings.push(warning)
+            markFinalText(text, tsMs)
           }
         }
       } else if (typeof c === 'string' && current) {
         const text = safeSnippet(c)
-        current.finalText = text
-        current.status = current.status === 'error' ? 'error' : 'ok'
-        if (tsMs && current.startedAtMs) current.durationMs = tsMs - current.startedAtMs
-        for (const warning of detectReplyQualityWarnings(text)) current.warnings.push(warning)
+        markFinalText(text, tsMs)
       }
     } else if (msg.role === 'toolResult' && current) {
       const text = safeSnippet(extractToolResultText(msg), 800)
@@ -924,6 +980,7 @@ router.get('/events', async (req, res) => {
 
     for (const agent of agentList) {
       const agentId = agent.id
+      const configuredModelRef = configuredModelForAgent(config, agent)
       const sessionsPath = path.join(HOME, `.openclaw/agents/${agentId}/sessions/sessions.json`)
 
       let sessionsMap = {}
@@ -1111,6 +1168,8 @@ router.get('/events', async (req, res) => {
               seenModelTexts.add(`${agentId}|${safeSnippet(text, 600)}`)
             }
           } else if (msg.role === 'assistant') {
+            const usageMetricsForMessage = normalizeUsageMetrics(usage)
+            const modelMetaForMessage = messageModelMetadata(msg, configuredModelRef, usageMetricsForMessage)
             const modelError = detectModelError(msg)
             if (modelError) {
               modelWarnings.push(modelError)
@@ -1121,11 +1180,20 @@ router.get('/events', async (req, res) => {
                 category: modelError.type,
                 text: modelError.summary,
                 detail: modelError.detail,
+                model: modelMetaForMessage.model,
+                provider: modelMetaForMessage.provider,
+                modelSource: modelMetaForMessage.modelSource,
+                finishReason: modelMetaForMessage.finishReason,
               })
             }
-            const usageMetricsForMessage = normalizeUsageMetrics(usage)
             let usageAttachedToMessage = false
             const attachUsageToEvent = (ev) => {
+              if (modelMetaForMessage.model) {
+                ev.model = modelMetaForMessage.model
+                ev.provider = modelMetaForMessage.provider
+                ev.modelSource = modelMetaForMessage.modelSource
+              }
+              if (modelMetaForMessage.finishReason) ev.finishReason = modelMetaForMessage.finishReason
               if (!usageMetricsForMessage || usageAttachedToMessage) return ev
               ev.inputTokens = usageMetricsForMessage.input
               ev.outputTokens = usageMetricsForMessage.output
@@ -1273,6 +1341,13 @@ router.get('/events', async (req, res) => {
             cleanKeyword: ev.cleanKeyword,
             intent: ev.intent,
             route: ev.route,
+            model: ev.model,
+            provider: ev.provider,
+            modelSource: ev.modelSource,
+            finishReason: ev.finishReason,
+            inputTokens: ev.inputTokens,
+            outputTokens: ev.outputTokens,
+            cost: ev.cost,
           })
         }
       }
@@ -1487,6 +1562,8 @@ agentSessionsRouter.get('/:id/sessions/:sessionKey(*)', (req, res) => {
               text: textParts.join('\n'),
               toolCalls,
               model: msg.model,
+              provider: msg.provider || providerFromModelRef(msg.model),
+              modelSource: msg.model ? 'actual' : null,
               stopReason: msg.stopReason,
               usage: usageMetrics ? {
                 input: usageMetrics.input,
@@ -1633,8 +1710,10 @@ module.exports = {
     normalizeSessionEntry,
     shouldIncludeMonitorMessage,
     extractToolResultText,
+    messageModelMetadata,
     normalizeUsageMetrics,
     normalizeTrajectoryEntries,
+    buildConversationTurnsFromSession,
     buildConversationTurnsFromGatewayLog,
     buildMonitorCost,
     parseToolNotFound,

@@ -1,6 +1,38 @@
 const router = require('express').Router()
-const { readOpenclawConfig, writeOpenclawConfigAtomic } = require('../lib/openclaw-config')
+const crypto = require('crypto')
+const { readOpenclawConfig, writeOpenclawConfigAtomic, withConfigLock } = require('../lib/openclaw-config')
 const { getModelCatalog } = require('../lib/model-catalog')
+const {
+  applyModelSettings,
+  getModelReadinessForConfig,
+} = require('../lib/model-readiness')
+
+const READINESS_TTL_MS = 30_000
+let readinessCache = null
+
+function configHash(config) {
+  return crypto.createHash('sha256').update(JSON.stringify(config || {})).digest('hex')
+}
+
+async function getCachedReadiness(config, { refresh = false } = {}) {
+  const hash = configHash(config)
+  if (!refresh && readinessCache && readinessCache.hash === hash && Date.now() - readinessCache.createdAt < READINESS_TTL_MS) {
+    return {
+      ...readinessCache.data,
+      cache: {
+        hit: true,
+        ttlSeconds: Math.ceil((READINESS_TTL_MS - (Date.now() - readinessCache.createdAt)) / 1000),
+      },
+    }
+  }
+  const readiness = await getModelReadinessForConfig(config, { refresh })
+  const cached = {
+    ...readiness,
+    cache: { hit: false, ttlSeconds: READINESS_TTL_MS / 1000 },
+  }
+  readinessCache = { hash, createdAt: Date.now(), data: cached }
+  return cached
+}
 
 // GET /api/model — อ่าน model ปัจจุบัน
 router.get('/model', (req, res) => {
@@ -43,6 +75,60 @@ router.get('/models/catalog', async (req, res) => {
   } catch (e) {
     console.error('[openclaw-api]', req.method, req.path, e.message)
     res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// GET /api/models/readiness?refresh=false — resolved model/fallback/image readiness
+router.get('/models/readiness', async (req, res) => {
+  try {
+    const config = readOpenclawConfig()
+    const refresh = req.query.refresh === 'true' || req.query.refresh === '1'
+    const readiness = await getCachedReadiness(config, { refresh })
+    res.json(readiness)
+  } catch (e) {
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// PUT /api/models/settings — validate and save primary/fallback/image model config
+router.put('/models/settings', async (req, res) => {
+  try {
+    const validateOnly = req.query.validateOnly === 'true' || req.query.validateOnly === '1'
+    const result = await withConfigLock(async () => {
+      const config = readOpenclawConfig()
+      const nextConfig = applyModelSettings(config, req.body || {})
+      const readiness = await getModelReadinessForConfig(nextConfig, { refresh: true })
+      const hash = configHash(nextConfig)
+      const cachedReadiness = {
+        ...readiness,
+        cache: { hit: false, ttlSeconds: READINESS_TTL_MS / 1000 },
+      }
+
+      if (readiness.blockingIssues.length) {
+        const err = new Error('Model settings are not ready')
+        err.statusCode = 400
+        err.payload = {
+          ok: false,
+          error: err.message,
+          blockingIssues: readiness.blockingIssues,
+          readiness: cachedReadiness,
+        }
+        throw err
+      }
+
+      if (validateOnly) {
+        return { ok: true, validateOnly: true, readiness: cachedReadiness }
+      }
+
+      const write = writeOpenclawConfigAtomic(nextConfig, { reason: 'model-settings' })
+      readinessCache = { hash, createdAt: Date.now(), data: cachedReadiness }
+      return { ok: true, write, readiness: cachedReadiness }
+    })
+    res.json(result)
+  } catch (e) {
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(e.statusCode || 400).json(e.payload || { error: e.message || 'Invalid model settings' })
   }
 })
 

@@ -7,6 +7,7 @@ const { execFileSync } = require('child_process')
 const { HOME, CONFIG_PATH } = require('../lib/config')
 const { readOpenclawConfig } = require('../lib/openclaw-config')
 const { buildLatencyFromGatewayLog } = require('../lib/monitor-latency')
+const { getModelReadinessForConfig } = require('../lib/model-readiness')
 const {
   DEFAULT_MCP_URL,
   compareSoulContractToTools,
@@ -201,6 +202,66 @@ function releaseState() {
       sha256: sha256File(path.join(HOME, 'openclaw-api/scripts/update-server.sh')),
     },
   }
+}
+
+function runtimeRootCandidates() {
+  return [
+    '/usr/lib/node_modules/openclaw',
+    '/usr/local/lib/node_modules/openclaw',
+    '/opt/homebrew/lib/node_modules/openclaw',
+    path.join(HOME, '.npm-global/lib/node_modules/openclaw'),
+  ]
+}
+
+function detectRuntimeGuardrails() {
+  const root = runtimeRootCandidates().find(candidate => {
+    try { return fs.existsSync(path.join(candidate, 'dist')) } catch { return false }
+  })
+  const markers = {
+    telegramVisibleAck: false,
+    productRouterV2: false,
+    monitorToolDetail: false,
+  }
+  if (!root) return { root: null, markers }
+  const distDir = path.join(root, 'dist')
+  let files = []
+  try {
+    files = fs.readdirSync(distDir).filter(name => name.endsWith('.js')).slice(0, 80)
+  } catch {
+    return { root, markers }
+  }
+  for (const file of files) {
+    let text = ''
+    try { text = fs.readFileSync(path.join(distDir, file), 'utf8').slice(0, 1_000_000) } catch { continue }
+    if (text.includes('OPENCLAW_TELEGRAM_VISIBLE_ACK') || text.includes('telegram_ack_sent')) markers.telegramVisibleAck = true
+    if (text.includes('OPENCLAW_TELEGRAM_PRODUCT_ROUTER_V2')) markers.productRouterV2 = true
+    if (text.includes('telegram_monitor_tool')) markers.monitorToolDetail = true
+    if (markers.telegramVisibleAck && markers.productRouterV2 && markers.monitorToolDetail) break
+  }
+  return { root, markers }
+}
+
+function runtimeGuardrailStatus() {
+  const startedAt = Date.now()
+  const result = detectRuntimeGuardrails()
+  const missing = Object.entries(result.markers).filter(([, ok]) => !ok).map(([key]) => key)
+  return makeCheck(
+    'runtime.guardrails',
+    'Runtime ERP guardrails',
+    missing.length ? 'warn' : 'ok',
+    'warn',
+    missing.length
+      ? `Official/custom runtime markers not all present: ${missing.join(', ')}`
+      : 'ERP Telegram guardrail markers present',
+    startedAt,
+    {
+      runtimeRoot: result.root,
+      markers: result.markers,
+      remediation: missing.length
+        ? 'Run Telegram regression after runtime updates; deploy custom runtime only if official runtime regresses required ERP chatbot behavior'
+        : undefined,
+    }
+  )
 }
 
 function releaseMetadataStatus() {
@@ -449,6 +510,7 @@ async function buildHealth() {
   checks.push(releaseMetadataStatus())
   checks.push(openclawRuntimeStatus())
   checks.push(nodeRuntimeStatus())
+  checks.push(runtimeGuardrailStatus())
 
   const gatewayStart = Date.now()
   try {
@@ -506,10 +568,47 @@ async function buildHealth() {
   ))
 
   const list = config.agents?.list || []
+  let modelReadiness = null
+  let modelReadinessError = null
+  const modelReadinessStart = Date.now()
+  try {
+    modelReadiness = await getModelReadinessForConfig(config, {
+      refresh: false,
+      timeoutMs: EXTERNAL_TIMEOUT_MS,
+    })
+    checks.push(makeCheck(
+      'model.readiness',
+      'Model readiness',
+      modelReadiness.ok ? 'ok' : 'warn',
+      'warn',
+      modelReadiness.ok
+        ? 'Primary, fallback, and image model settings validate against provider catalogs'
+        : `${modelReadiness.blockingIssues.length} model readiness issue(s) found`,
+      modelReadinessStart,
+      {
+        warnings: modelReadiness.warnings,
+        remediation: modelReadiness.ok ? undefined : 'Open /model, validate settings, save, then restart gateway',
+      }
+    ))
+  } catch (e) {
+    modelReadinessError = sanitizeError(e)
+    checks.push(makeCheck(
+      'model.readiness',
+      'Model readiness',
+      'warn',
+      'warn',
+      `Unable to validate model readiness: ${modelReadinessError}`,
+      modelReadinessStart,
+      { remediation: 'Open /model after provider catalog connectivity is restored' }
+    ))
+  }
+  const modelByAgent = new Map((modelReadiness?.agents || []).map(agent => [agent.id, agent]))
+
   await Promise.all(list.map(async (agent) => {
     const mcp = getAgentMcp(config, agent.id)
     const auth = hasAuthProfile(agent.id)
-    const modelFallbacks = resolveAgentModelFallbacks(config, agent)
+    const agentModelReadiness = modelByAgent.get(agent.id)
+    const modelFallbacks = agentModelReadiness?.model?.fallbacks || resolveAgentModelFallbacks(config, agent)
     let toolCount = 0
     let mcpStatus = 'warn'
     let mcpSummary = 'No MCP server configured'
@@ -568,35 +667,51 @@ async function buildHealth() {
     ))
 
     const fallbackStart = Date.now()
+    const fallbackIssues = (agentModelReadiness?.model?.fallbacks || [])
+      .filter(item => item.status !== 'ready')
     checks.push(makeCheck(
       `model.fallback.${agent.id}`,
       `Model fallback ${agent.id}`,
-      modelFallbacks.length ? 'ok' : 'warn',
+      modelFallbacks.length && fallbackIssues.length === 0 ? 'ok' : 'warn',
       'warn',
-      modelFallbacks.length
-        ? `${modelFallbacks.length} fallback model(s) configured`
-        : 'No fallback model configured; Telegram may surface model/provider timeouts',
+      modelReadinessError
+        ? `Model readiness unavailable: ${modelReadinessError}`
+        : modelFallbacks.length
+          ? fallbackIssues.length
+            ? `${modelFallbacks.length} fallback model(s) configured; ${fallbackIssues.length} not ready`
+            : `${modelFallbacks.length} fallback model(s) ready`
+          : 'No fallback model configured; Telegram may surface model/provider timeouts',
       fallbackStart,
-      { remediation: modelFallbacks.length ? undefined : 'Set agents.defaults.model.fallbacks or agent.model.fallbacks in openclaw.json' }
+      {
+        readiness: agentModelReadiness?.model,
+        remediation: modelFallbacks.length && fallbackIssues.length === 0
+          ? undefined
+          : 'Open /model?section=fallbacks, validate fallback models, save, then restart gateway',
+      }
     ))
 
     const imageModelStart = Date.now()
-    const usesImageTool = agentUsesImageTool(agent)
-    const imageModelConfigured = hasImageModelConfig(config, agent)
+    const usesImageTool = agentModelReadiness?.usesImageTool ?? agentUsesImageTool(agent)
+    const imageReadiness = agentModelReadiness?.imageModel
+    const imageModelConfigured = imageReadiness?.configured ?? hasImageModelConfig(config, agent)
+    const imageReady = Boolean(imageReadiness?.primary?.status === 'ready')
     checks.push(makeCheck(
       `model.image.${agent.id}`,
       `Image model ${agent.id}`,
-      !usesImageTool || imageModelConfigured ? 'ok' : 'warn',
+      !usesImageTool || imageReady ? 'ok' : 'warn',
       'warn',
       !usesImageTool
         ? 'Agent does not use image tool'
-        : imageModelConfigured
-          ? 'Image model explicitly configured'
-          : 'Image tool uses auto model resolution; invalid model overrides may add latency',
+        : modelReadinessError
+          ? `Model readiness unavailable: ${modelReadinessError}`
+          : imageModelConfigured
+            ? (imageReadiness?.primary?.summary || 'Image model configured but not ready')
+            : 'Image tool uses auto model resolution; invalid model overrides may add latency',
       imageModelStart,
       {
-        remediation: usesImageTool && !imageModelConfigured
-          ? 'Set agents.defaults.imageModel to a known available vision model for predictable image latency'
+        readiness: imageReadiness,
+        remediation: usesImageTool && !imageReady
+          ? 'Open /model?section=image and set a known image-capable model'
           : undefined,
       }
     ))

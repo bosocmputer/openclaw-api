@@ -186,6 +186,45 @@ test('runtime status is unverified before a runtime test has run', () => {
   assert.equal(status.runtimeStatus, 'runtime_unverified')
 })
 
+test('runtime test cache key includes provider key from env vars', async () => {
+  clearModelRuntimeTestCache()
+  let inferCalls = 0
+  const spawnImpl = spawnFor(args => {
+    if (args.includes('--version')) return { stdout: 'OpenClaw 2026.6.8 (test)\n' }
+    inferCalls += 1
+    return {
+      stdout: JSON.stringify({
+        ok: true,
+        provider: 'kilocode',
+        model: 'openai/gpt-4o-mini',
+        outputs: [{ text: 'OPENCLAW_MODEL_TEST_OK' }],
+      }),
+    }
+  })
+
+  await runModelRuntimeTest({
+    model: 'kilocode/openai/gpt-4o-mini',
+    capability: 'text',
+    config: { env: { vars: { KILOCODE_API_KEY: 'kc-first' } } },
+    spawnImpl,
+  })
+  const cached = await runModelRuntimeTest({
+    model: 'kilocode/openai/gpt-4o-mini',
+    capability: 'text',
+    config: { env: { vars: { KILOCODE_API_KEY: 'kc-first' } } },
+    spawnImpl,
+  })
+  await runModelRuntimeTest({
+    model: 'kilocode/openai/gpt-4o-mini',
+    capability: 'text',
+    config: { env: { vars: { KILOCODE_API_KEY: 'kc-second' } } },
+    spawnImpl,
+  })
+
+  assert.equal(cached.cache.hit, true)
+  assert.equal(inferCalls, 2)
+})
+
 test('uploaded image message test passes the selected image file to runtime', async () => {
   clearModelRuntimeTestCache()
   const samplePng = 'iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAIAAAACUFjqAAAAFElEQVR4nGP8z4APMOGVhZnhPwMApH0BAbf9u0YAAAAASUVORK5CYII='

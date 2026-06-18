@@ -7,6 +7,7 @@ const {
   collectRuntimeVerificationIssues,
   getModelReadinessForConfig,
 } = require('../lib/model-readiness')
+const { materializeProviderCatalogsForRefs, materializeSelectedProviderCatalogs } = require('../lib/model-provider-materialize')
 const { runModelImageMessageTest, runModelMessageTest, runModelRuntimeTest } = require('../lib/model-runtime-test')
 
 const READINESS_TTL_MS = 30_000
@@ -34,6 +35,41 @@ async function getCachedReadiness(config, { refresh = false } = {}) {
   }
   readinessCache = { hash, createdAt: Date.now(), data: cached }
   return cached
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+async function prepareRuntimeCatalogsForRefs(refs, { reason = 'model-runtime-test-catalog' } = {}) {
+  const selectedRefs = [...new Set((refs || []).map(item => String(item || '').trim()).filter(Boolean))]
+  if (!selectedRefs.length) {
+    return { changed: false, preparedProviders: [], warnings: [], config: readOpenclawConfig() }
+  }
+
+  const result = await withConfigLock(async () => {
+    const current = readOpenclawConfig()
+    const materialized = await materializeProviderCatalogsForRefs(current, selectedRefs, { refresh: true })
+    if (!materialized.changed) return materialized
+    const write = writeOpenclawConfigAtomic(materialized.config, { reason })
+    readinessCache = null
+    return { ...materialized, write }
+  })
+
+  // OpenClaw gateway hot-reloads config asynchronously. A short pause prevents
+  // the immediate retry from racing the file watcher on slower customer VMs.
+  if (result.changed) await sleep(1200)
+  return result
+}
+
+function withPreparedCatalogFailureHint(result, prepared) {
+  if (!prepared?.changed || result?.status !== 'model_not_found') return result
+  return {
+    ...result,
+    safeMessage: 'เตรียม catalog ให้ OpenClaw แล้ว แต่ gateway ยังไม่โหลดค่าใหม่ กรุณา Restart Gateway แล้วทดสอบอีกครั้ง',
+    catalogPrepared: true,
+    preparedProviders: prepared.preparedProviders,
+  }
 }
 
 // GET /api/model — อ่าน model ปัจจุบัน
@@ -120,14 +156,19 @@ router.post('/models/runtime-test', async (req, res) => {
         error: 'only gateway runtime tests are supported',
       })
     }
+    const prepared = await prepareRuntimeCatalogsForRefs([model], { reason: 'model-runtime-test-catalog' })
     const result = await runModelRuntimeTest({
       model,
       capability,
       mode,
-      config,
+      config: prepared.config || config,
       refresh: Boolean(refresh),
     })
-    res.json(result)
+    res.json(withPreparedCatalogFailureHint({
+      ...result,
+      catalogPrepared: Boolean(prepared.changed),
+      preparedProviders: prepared.preparedProviders || [],
+    }, prepared))
   } catch (e) {
     console.error('[openclaw-api]', req.method, req.path, e.message)
     res.status(500).json({
@@ -183,6 +224,7 @@ router.post('/models/message-test', async (req, res) => {
 
     const models = [primaryModel, ...fallbackModels]
       .filter((item, index, arr) => item && arr.indexOf(item) === index)
+    const prepared = await prepareRuntimeCatalogsForRefs(models, { reason: 'model-message-test-catalog' })
     const startedAt = Date.now()
     const attempts = []
 
@@ -192,14 +234,14 @@ router.post('/models/message-test', async (req, res) => {
         prompt: testPrompt,
         capability: 'text',
         mode: 'gateway',
-        config,
+        config: prepared.config || config,
       })
       attempts.push({
         model,
         ok: result.ok,
         status: result.ok ? 'ok' : result.status,
         durationMs: result.durationMs,
-        safeMessage: result.safeMessage || result.summary,
+        safeMessage: withPreparedCatalogFailureHint(result, prepared).safeMessage || result.summary,
         outputPreview: result.outputPreview || null,
         runtimeVersion: result.runtimeVersion || null,
       })
@@ -217,6 +259,8 @@ router.post('/models/message-test', async (req, res) => {
         safeMessage: failed?.safeMessage || 'ทดสอบ model ไม่ผ่าน',
         outputPreview: primaryAttempt?.outputPreview || null,
         attempts,
+        catalogPrepared: Boolean(prepared.changed),
+        preparedProviders: prepared.preparedProviders || [],
       })
     }
 
@@ -227,6 +271,8 @@ router.post('/models/message-test', async (req, res) => {
       durationMs: totalDurationMs,
       outputPreview: primaryAttempt.outputPreview || null,
       attempts,
+      catalogPrepared: Boolean(prepared.changed),
+      preparedProviders: prepared.preparedProviders || [],
       safeMessage: models.length > 1
         ? 'Model หลักและ Model สำรองที่เลือกไว้ทดสอบผ่าน'
         : 'Model หลักทดสอบผ่าน',
@@ -289,15 +335,20 @@ router.post('/models/image-message-test', async (req, res) => {
       })
     }
 
+    const prepared = await prepareRuntimeCatalogsForRefs([modelRef], { reason: 'model-image-test-catalog' })
     const result = await runModelImageMessageTest({
       model: modelRef,
       prompt: testPrompt,
       image,
       capability: 'image',
       mode: 'gateway',
-      config,
+      config: prepared.config || config,
     })
-    res.json(result)
+    res.json(withPreparedCatalogFailureHint({
+      ...result,
+      catalogPrepared: Boolean(prepared.changed),
+      preparedProviders: prepared.preparedProviders || [],
+    }, prepared))
   } catch (e) {
     console.error('[openclaw-api]', req.method, req.path, e.message)
     res.status(500).json({
@@ -330,9 +381,11 @@ router.put('/models/settings', async (req, res) => {
     const result = await withConfigLock(async () => {
       const config = readOpenclawConfig()
       const nextConfig = applyModelSettings(config, req.body || {})
-      const readiness = await getModelReadinessForConfig(nextConfig, { refresh: true })
+      const materialized = await materializeSelectedProviderCatalogs(nextConfig, { refresh: true })
+      const effectiveConfig = materialized.config
+      const readiness = await getModelReadinessForConfig(effectiveConfig, { refresh: true })
       const runtimeIssues = collectRuntimeVerificationIssues(readiness)
-      const hash = configHash(nextConfig)
+      const hash = configHash(effectiveConfig)
       const cachedReadiness = {
         ...readiness,
         cache: { hit: false, ttlSeconds: READINESS_TTL_MS / 1000 },
@@ -371,13 +424,15 @@ router.put('/models/settings', async (req, res) => {
         }
       }
 
-      const write = writeOpenclawConfigAtomic(nextConfig, {
+      const write = writeOpenclawConfigAtomic(effectiveConfig, {
         reason: allowRuntimeOverride && runtimeIssues.length ? 'model-settings-runtime-override' : 'model-settings',
       })
       readinessCache = { hash, createdAt: Date.now(), data: cachedReadiness }
       return {
         ok: true,
         runtimeOverride: Boolean(runtimeIssues.length && allowRuntimeOverride),
+        preparedProviders: materialized.preparedProviders || [],
+        materializeWarnings: materialized.warnings || [],
         write,
         readiness: cachedReadiness,
       }

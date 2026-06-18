@@ -79,6 +79,57 @@ function redact(value) {
   return out
 }
 
+function summarizeModelReadiness(modelReadiness) {
+  if (modelReadiness.ok && !modelReadiness.runtimeVerificationIssues?.length) {
+    return {
+      summary: 'Primary, fallback, image, and runtime model checks are ready',
+      remediation: undefined,
+    }
+  }
+
+  if (modelReadiness.blockingIssues?.length) {
+    const statuses = modelReadiness.blockingIssues.reduce((acc, issue) => {
+      const status = issue.status || 'unknown'
+      acc[status] = (acc[status] || 0) + 1
+      return acc
+    }, {})
+    const statusSummary = Object.entries(statuses)
+      .map(([status, count]) => `${status} (${count})`)
+      .join(', ')
+    return {
+      summary: `${modelReadiness.blockingIssues.length} model readiness issue(s): ${statusSummary}`,
+      remediation: 'Open /model, fix provider key/model selection, validate settings, save, then restart gateway',
+    }
+  }
+
+  const runtimeIssues = modelReadiness.runtimeVerificationIssues || []
+  const statuses = runtimeIssues.reduce((acc, issue) => {
+    const status = issue.status || 'runtime_unverified'
+    acc[status] = (acc[status] || 0) + 1
+    return acc
+  }, {})
+  const statusSummary = Object.entries(statuses)
+    .map(([status, count]) => `${status} (${count})`)
+    .join(', ')
+  const hasImageCapabilityIssue = runtimeIssues.some(issue => issue.status === 'not_image_capable')
+  const hasInvalidOutput = runtimeIssues.some(issue => issue.status === 'invalid_output')
+  const hasTimeout = runtimeIssues.some(issue => issue.status === 'timeout')
+
+  let remediation = 'Open /model, run runtime tests for selected models, validate settings, save, then restart gateway'
+  if (hasImageCapabilityIssue) {
+    remediation = 'Open /model and choose an image-capable model that passes runtime test, or disable image config before production image use'
+  } else if (hasInvalidOutput) {
+    remediation = 'Open /model and replace models that return invalid runtime output before saving'
+  } else if (hasTimeout) {
+    remediation = 'Open /model and move slow/timeout models lower in the fallback chain or replace them'
+  }
+
+  return {
+    summary: `${runtimeIssues.length} model runtime issue(s): ${statusSummary}`,
+    remediation,
+  }
+}
+
 function readJsonFile(filePath) {
   return JSON.parse(fs.readFileSync(filePath, 'utf8'))
 }
@@ -581,17 +632,11 @@ async function buildHealth() {
       'Model readiness',
       modelReadiness.ok && !modelReadiness.runtimeVerificationIssues?.length ? 'ok' : 'warn',
       'warn',
-      modelReadiness.ok && !modelReadiness.runtimeVerificationIssues?.length
-        ? 'Primary, fallback, image, and runtime model checks are ready'
-        : modelReadiness.blockingIssues.length
-          ? `${modelReadiness.blockingIssues.length} model readiness issue(s) found`
-          : `${modelReadiness.runtimeVerificationIssues.length} model(s) need runtime verification`,
+      summarizeModelReadiness(modelReadiness).summary,
       modelReadinessStart,
       {
         warnings: modelReadiness.warnings,
-        remediation: modelReadiness.ok && !modelReadiness.runtimeVerificationIssues?.length
-          ? undefined
-          : 'Open /model, run runtime tests for selected models, validate settings, save, then restart gateway',
+        remediation: summarizeModelReadiness(modelReadiness).remediation,
       }
     ))
   } catch (e) {

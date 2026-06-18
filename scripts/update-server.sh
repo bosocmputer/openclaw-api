@@ -22,7 +22,22 @@ STATE_DIR="${STATE_DIR:-$HOME/.openclaw}"
 CONFIG_PATH="$STATE_DIR/openclaw.json"
 API_URL="${API_URL:-http://127.0.0.1:4000}"
 PM2_PROCESS="${PM2_PROCESS:-openclaw-api}"
-RUNTIME_DIST_DIR="${RUNTIME_DIST_DIR:-/usr/lib/node_modules/openclaw/dist}"
+detect_runtime_dist_dir() {
+  local npm_root=""
+  if command -v npm >/dev/null 2>&1; then
+    npm_root="$(npm root -g 2>/dev/null || true)"
+  fi
+  for candidate in \
+    "$npm_root/openclaw/dist" \
+    "$HOME/.npm-global/lib/node_modules/openclaw/dist" \
+    /usr/lib/node_modules/openclaw/dist \
+    /usr/local/lib/node_modules/openclaw/dist \
+    /opt/openclaw/lib/node_modules/openclaw/dist; do
+    [[ -n "$candidate" && -d "$candidate" ]] && { echo "$candidate"; return 0; }
+  done
+  return 1
+}
+RUNTIME_DIST_DIR="${RUNTIME_DIST_DIR:-$(detect_runtime_dist_dir || true)}"
 DEPLOY_METADATA="$STATE_DIR/deploy-metadata.json"
 DEFAULT_MCP_URL="http://192.168.2.248:3515/sse"
 
@@ -165,6 +180,9 @@ preflight() {
   if [[ -n "$ARTIFACT_PATH" ]]; then
     command -v rsync >/dev/null || { err "rsync not found"; exit 1; }
     [[ ! -f "$ARTIFACT_PATH" ]] || command -v tar >/dev/null || { err "tar not found"; exit 1; }
+    if [[ -z "$RUNTIME_DIST_DIR" ]]; then
+      warn "Runtime dist was not auto-detected; set RUNTIME_DIST_DIR if artifact contains openclaw-dist"
+    fi
     if [[ -d "$RUNTIME_DIST_DIR" && ! -w "$RUNTIME_DIST_DIR" ]]; then
       sudo_available \
         && ok "sudo available for runtime dist writes" \
@@ -253,6 +271,18 @@ checksum_file() {
   fi
 }
 
+runtime_check_files() {
+  local dir="$1"
+  find "$dir" -maxdepth 1 -type f \( \
+    -name 'index.js' -o \
+    -name 'agent-runner.runtime*.js' -o \
+    -name 'send*.js' -o \
+    -name 'delivery*.js' -o \
+    -name 'bot*.js' -o \
+    -name 'openclaw-tools*.js' \
+  \) | sort
+}
+
 copy_runtime_file() {
   local src="$1"
   local dest="$RUNTIME_DIST_DIR/$(basename "$src")"
@@ -319,7 +349,14 @@ const distFiles = {}
   let names = []
   try {
     names = fs.readdirSync(distDir)
-      .filter(name => /^bot-.*\.js$/.test(name) || /^openclaw-tools-.*\.js$/.test(name))
+      .filter(name =>
+        name === 'index.js' ||
+        /^agent-runner\.runtime.*\.js$/.test(name) ||
+        /^send.*\.js$/.test(name) ||
+        /^delivery.*\.js$/.test(name) ||
+        /^bot.*\.js$/.test(name) ||
+        /^openclaw-tools.*\.js$/.test(name)
+      )
       .sort()
   } catch {}
   for (const name of names) {
@@ -361,15 +398,18 @@ deploy_artifact() {
   ARTIFACT_RESOLVED_DIR="$artifact_dir"
 
   if [[ -d "$artifact_dir/openclaw-dist" ]]; then
+    [[ -n "$RUNTIME_DIST_DIR" && -d "$RUNTIME_DIST_DIR" ]] || { err "Runtime dist not found. Set RUNTIME_DIST_DIR=/path/to/openclaw/dist"; exit 1; }
     copy_runtime_glob_from_dir "$artifact_dir/openclaw-dist"
-    find "$artifact_dir/openclaw-dist" -maxdepth 1 -type f \( -name 'bot-*.js' -o -name 'openclaw-tools-*.js' \) -print0 | while IFS= read -r -d '' file; do
+    runtime_check_files "$artifact_dir/openclaw-dist" | while IFS= read -r file; do
       node --check "$RUNTIME_DIST_DIR/$(basename "$file")"
     done
     CHANGED_RUNTIME=1
   fi
   if [[ -d "$artifact_dir/openclaw-api" ]]; then
     rsync -a --exclude node_modules --exclude .git "$artifact_dir/openclaw-api"/ "$API_DIR"/
-    find "$API_DIR/routes" "$API_DIR/lib" -maxdepth 2 -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check
+    find "$API_DIR/routes" "$API_DIR/lib" -maxdepth 2 -type f -name '*.js' -print0 | while IFS= read -r -d '' file; do
+      node --check "$file"
+    done
     CHANGED_API=1
   fi
   if [[ -d "$artifact_dir/openclaw-admin" ]]; then

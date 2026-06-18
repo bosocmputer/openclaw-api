@@ -58,18 +58,34 @@ require_cmd tar
 require_dir "openclaw-api" "$API_DIR"
 require_dir "openclaw-admin" "$ADMIN_DIR"
 
+runtime_check_files() {
+  local dir="$1"
+  find "$dir" -maxdepth 1 -type f \( \
+    -name 'index.js' -o \
+    -name 'agent-runner.runtime*.js' -o \
+    -name 'send*.js' -o \
+    -name 'delivery*.js' -o \
+    -name 'bot*.js' -o \
+    -name 'openclaw-tools*.js' \
+  \) | sort
+}
+
+runtime_require_glob() {
+  local label="$1"
+  local pattern="$2"
+  if ! find "$RUNTIME_DIST_DIR" -maxdepth 1 -type f -name "$pattern" | grep -q .; then
+    err "No $label runtime file found in $RUNTIME_DIST_DIR (pattern: $pattern)"
+    err "Build openclaw runtime first, pass --runtime-dist-dir, or use --no-runtime for API/Admin-only releases."
+    exit 1
+  fi
+}
+
 if [[ "$INCLUDE_RUNTIME" -eq 1 ]]; then
   require_dir "runtime dist" "$RUNTIME_DIST_DIR"
-  find "$RUNTIME_DIST_DIR" -maxdepth 1 -type f -name 'bot-*.js' | grep -q . || {
-    err "No bot-*.js runtime entry found in $RUNTIME_DIST_DIR"
-    err "Build openclaw runtime first, pass --runtime-dist-dir, or use --no-runtime for API/Admin-only releases."
-    exit 1
-  }
-  find "$RUNTIME_DIST_DIR" -maxdepth 1 -type f -name 'openclaw-tools-*.js' | grep -q . || {
-    err "No openclaw-tools-*.js runtime entry found in $RUNTIME_DIST_DIR"
-    err "Build openclaw runtime first, pass --runtime-dist-dir, or use --no-runtime for API/Admin-only releases."
-    exit 1
-  }
+  runtime_require_glob "CLI entry" "index.js"
+  runtime_require_glob "agent runner" "agent-runner.runtime*.js"
+  runtime_require_glob "Telegram/send path" "send*.js"
+  runtime_require_glob "delivery path" "delivery*.js"
 fi
 
 rm -rf "$STAGE_DIR"
@@ -77,13 +93,18 @@ mkdir -p "$STAGE_DIR/openclaw-api" "$STAGE_DIR/openclaw-admin"
 
 COMMON_EXCLUDES=(
   --exclude .git
+  --exclude .github
+  --exclude .claude
   --exclude node_modules
   --exclude '.env'
   --exclude '.env.*'
   --exclude '*.log'
+  --exclude '*.tsbuildinfo'
   --exclude '.DS_Store'
   --exclude '._*'
+  --exclude '.graphifyignore'
   --exclude graphify-out
+  --exclude MCP-SML-QUICKREF.md
 )
 
 log "Copying openclaw-api source"
@@ -94,7 +115,6 @@ rsync -a "${COMMON_EXCLUDES[@]}" \
 log "Copying openclaw-admin source"
 rsync -a "${COMMON_EXCLUDES[@]}" \
   --exclude .next \
-  --exclude .claude \
   "$ADMIN_DIR"/ "$STAGE_DIR/openclaw-admin"/
 
 if [[ "$INCLUDE_RUNTIME" -eq 1 ]]; then
@@ -104,12 +124,14 @@ if [[ "$INCLUDE_RUNTIME" -eq 1 ]]; then
 fi
 
 log "Running syntax checks on artifact"
-find "$STAGE_DIR/openclaw-api/routes" "$STAGE_DIR/openclaw-api/lib" -maxdepth 2 -type f -name '*.js' -print0 \
-  | xargs -0 -r -n1 node --check
+while IFS= read -r -d '' file; do
+  node --check "$file"
+done < <(find "$STAGE_DIR/openclaw-api/routes" "$STAGE_DIR/openclaw-api/lib" -maxdepth 2 -type f -name '*.js' -print0)
 bash -n "$STAGE_DIR/openclaw-api/scripts/update-server.sh"
 if [[ "$INCLUDE_RUNTIME" -eq 1 ]]; then
-  find "$STAGE_DIR/openclaw-dist" -maxdepth 1 -type f \( -name 'bot-*.js' -o -name 'openclaw-tools-*.js' \) -print0 \
-    | xargs -0 -r -n1 node --check
+  while IFS= read -r file; do
+    node --check "$file"
+  done < <(runtime_check_files "$STAGE_DIR/openclaw-dist")
 fi
 
 log "Writing release manifest"
@@ -129,13 +151,26 @@ function git(cwd, args) {
   try { return execFileSync('git', args, { cwd, timeout: 2000 }).toString().trim() } catch { return null }
 }
 
+function packageRelevantStatus(status) {
+  const ignoredPathPrefixes = ['.github/', '.claude/', 'graphify-out/']
+  const ignoredExactPaths = new Set(['.graphifyignore', 'MCP-SML-QUICKREF.md'])
+  return status.filter(line => {
+    const file = line.replace(/^[ MARCUD?!]{1,2}\s+/, '')
+    if (ignoredExactPaths.has(file)) return false
+    return !ignoredPathPrefixes.some(prefix => file === prefix.slice(0, -1) || file.startsWith(prefix))
+  })
+}
+
 function repo(cwd) {
+  const status = (git(cwd, ['status', '--porcelain']) || '').split('\n').filter(Boolean).slice(0, 80)
+  const artifactRelevantStatus = packageRelevantStatus(status)
   return {
     path: cwd,
     branch: git(cwd, ['branch', '--show-current']),
     head: git(cwd, ['rev-parse', 'HEAD']),
-    dirty: Boolean(git(cwd, ['status', '--porcelain'])),
-    status: (git(cwd, ['status', '--porcelain']) || '').split('\n').filter(Boolean).slice(0, 80),
+    dirty: Boolean(artifactRelevantStatus.length),
+    status: artifactRelevantStatus,
+    ignoredWorkspaceStatus: status.filter(line => !artifactRelevantStatus.includes(line)),
   }
 }
 
@@ -183,9 +218,24 @@ NODE
 
 mkdir -p "$(dirname "$OUTPUT")"
 TAR_ARGS=(-czf "$OUTPUT" -C "$STAGE_DIR" .)
-if tar --help 2>&1 | grep -q -- '--disable-copyfile'; then
-  TAR_ARGS=(--disable-copyfile "${TAR_ARGS[@]}")
-fi
+tar_supports_option() {
+  local option="$1"
+  local tmp_dir
+  tmp_dir="$(mktemp -d)"
+  printf 'ok\n' > "$tmp_dir/probe.txt"
+  if tar "$option" -czf "$tmp_dir/probe.tgz" -C "$tmp_dir" probe.txt >/dev/null 2>&1; then
+    rm -rf "$tmp_dir"
+    return 0
+  fi
+  rm -rf "$tmp_dir"
+  return 1
+}
+
+for option in --disable-copyfile --no-mac-metadata --no-xattrs --no-acls --no-fflags; do
+  if tar_supports_option "$option"; then
+    TAR_ARGS=("$option" "${TAR_ARGS[@]}")
+  fi
+done
 
 log "Packing $OUTPUT"
 COPYFILE_DISABLE=1 tar "${TAR_ARGS[@]}"

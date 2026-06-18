@@ -96,6 +96,28 @@ test('runtime model test maps OpenClaw unknown model errors to model_not_found',
   assert.match(result.safeMessage, /runtime/)
 })
 
+test('runtime model test maps unsupported image attachments to not_image_capable', async () => {
+  clearModelRuntimeTestCache()
+  const spawnImpl = spawnFor(args => {
+    if (args.includes('--version')) return { stdout: 'OpenClaw 2026.6.8 (test)\n' }
+    return {
+      code: 1,
+      stderr: 'UnsupportedAttachmentError: attachment model-test.png: active model does not accept image inputs',
+    }
+  })
+
+  const result = await runModelRuntimeTest({
+    model: 'openrouter/google/gemini-2.5-flash-lite',
+    capability: 'image',
+    config: { env: { OPENROUTER_API_KEY: 'sk-or-test' } },
+    spawnImpl,
+  })
+
+  assert.equal(result.ok, false)
+  assert.equal(result.status, 'not_image_capable')
+  assert.match(result.safeMessage, /รูปภาพ/)
+})
+
 test('runtime status is unverified before a runtime test has run', () => {
   clearModelRuntimeTestCache()
   const status = runtimeStatusForRef('openrouter/google/gemini-2.5-flash-lite', {

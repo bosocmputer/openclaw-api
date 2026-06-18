@@ -7,7 +7,7 @@ const {
   collectRuntimeVerificationIssues,
   getModelReadinessForConfig,
 } = require('../lib/model-readiness')
-const { runModelRuntimeTest } = require('../lib/model-runtime-test')
+const { runModelImageMessageTest, runModelMessageTest, runModelRuntimeTest } = require('../lib/model-runtime-test')
 
 const READINESS_TTL_MS = 30_000
 let readinessCache = null
@@ -135,6 +135,180 @@ router.post('/models/runtime-test', async (req, res) => {
       status: 'runtime_unavailable',
       error: 'Runtime test failed',
       safeMessage: 'OpenClaw runtime หรือ gateway ยังไม่พร้อมสำหรับทดสอบ model',
+    })
+  }
+})
+
+// POST /api/models/message-test — run an admin-supplied text prompt through selected runtime models
+router.post('/models/message-test', async (req, res) => {
+  try {
+    const config = readOpenclawConfig()
+    const { primary, fallbacks = [], prompt, capability = 'text' } = req.body || {}
+    const primaryModel = String(primary || '').trim()
+    const fallbackModels = Array.isArray(fallbacks)
+      ? fallbacks.map(item => String(item || '').trim()).filter(Boolean)
+      : []
+    const testPrompt = String(prompt || '').trim()
+
+    if (String(capability) !== 'text') {
+      return res.status(400).json({
+        ok: false,
+        status: 'provider_error',
+        selectedModel: null,
+        durationMs: 0,
+        safeMessage: 'Message test รองรับข้อความเท่านั้น',
+        attempts: [],
+      })
+    }
+    if (!primaryModel) {
+      return res.status(400).json({
+        ok: false,
+        status: 'model_not_found',
+        selectedModel: null,
+        durationMs: 0,
+        safeMessage: 'กรุณาเลือก Model หลักก่อนทดสอบ',
+        attempts: [],
+      })
+    }
+    if (!testPrompt) {
+      return res.status(400).json({
+        ok: false,
+        status: 'invalid_output',
+        selectedModel: null,
+        durationMs: 0,
+        safeMessage: 'กรุณาพิมพ์ข้อความทดสอบก่อน',
+        attempts: [],
+      })
+    }
+
+    const models = [primaryModel, ...fallbackModels]
+      .filter((item, index, arr) => item && arr.indexOf(item) === index)
+    const startedAt = Date.now()
+    const attempts = []
+
+    for (const model of models) {
+      const result = await runModelMessageTest({
+        model,
+        prompt: testPrompt,
+        capability: 'text',
+        mode: 'gateway',
+        config,
+      })
+      attempts.push({
+        model,
+        ok: result.ok,
+        status: result.ok ? 'ok' : result.status,
+        durationMs: result.durationMs,
+        safeMessage: result.safeMessage || result.summary,
+        outputPreview: result.outputPreview || null,
+        runtimeVersion: result.runtimeVersion || null,
+      })
+    }
+
+    const failed = attempts.find(item => !item.ok)
+    const primaryAttempt = attempts[0]
+    const totalDurationMs = Date.now() - startedAt
+    if (failed || !primaryAttempt?.ok) {
+      return res.json({
+        ok: false,
+        status: failed?.status || 'provider_error',
+        selectedModel: primaryAttempt?.ok ? primaryAttempt.model : null,
+        durationMs: totalDurationMs,
+        safeMessage: failed?.safeMessage || 'ทดสอบ model ไม่ผ่าน',
+        outputPreview: primaryAttempt?.outputPreview || null,
+        attempts,
+      })
+    }
+
+    res.json({
+      ok: true,
+      status: 'ok',
+      selectedModel: primaryAttempt.model,
+      durationMs: totalDurationMs,
+      outputPreview: primaryAttempt.outputPreview || null,
+      attempts,
+      safeMessage: models.length > 1
+        ? 'Model หลักและ Model สำรองที่เลือกไว้ทดสอบผ่าน'
+        : 'Model หลักทดสอบผ่าน',
+    })
+  } catch (e) {
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({
+      ok: false,
+      status: 'runtime_unavailable',
+      selectedModel: null,
+      durationMs: 0,
+      safeMessage: 'OpenClaw runtime หรือ gateway ยังไม่พร้อมสำหรับทดสอบ model',
+      attempts: [],
+    })
+  }
+})
+
+// POST /api/models/image-message-test — run an admin-uploaded image prompt through an image runtime model
+router.post('/models/image-message-test', async (req, res) => {
+  try {
+    const config = readOpenclawConfig()
+    const { model, prompt, image } = req.body || {}
+    const modelRef = String(model || '').trim()
+    const testPrompt = String(prompt || '').trim()
+
+    if (!modelRef) {
+      return res.status(400).json({
+        ok: false,
+        status: 'model_not_found',
+        model: modelRef,
+        capability: 'image',
+        mode: 'gateway',
+        runtimeVersion: 'unknown',
+        durationMs: 0,
+        safeMessage: 'กรุณาเลือก Model รูปภาพก่อนทดสอบ',
+      })
+    }
+    if (!testPrompt) {
+      return res.status(400).json({
+        ok: false,
+        status: 'invalid_output',
+        model: modelRef,
+        capability: 'image',
+        mode: 'gateway',
+        runtimeVersion: 'unknown',
+        durationMs: 0,
+        safeMessage: 'กรุณาพิมพ์ข้อความทดสอบรูปภาพก่อน',
+      })
+    }
+    if (!image || typeof image !== 'object') {
+      return res.status(400).json({
+        ok: false,
+        status: 'invalid_output',
+        model: modelRef,
+        capability: 'image',
+        mode: 'gateway',
+        runtimeVersion: 'unknown',
+        durationMs: 0,
+        safeMessage: 'กรุณาอัปโหลดรูปภาพก่อนทดสอบ',
+      })
+    }
+
+    const result = await runModelImageMessageTest({
+      model: modelRef,
+      prompt: testPrompt,
+      image,
+      capability: 'image',
+      mode: 'gateway',
+      config,
+    })
+    res.json(result)
+  } catch (e) {
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({
+      ok: false,
+      status: 'runtime_unavailable',
+      model: String(req.body?.model || ''),
+      capability: 'image',
+      mode: 'gateway',
+      runtimeVersion: 'unknown',
+      durationMs: 0,
+      safeMessage: 'OpenClaw runtime หรือ gateway ยังไม่พร้อมสำหรับทดสอบ model รูปภาพ',
     })
   }
 })

@@ -4,6 +4,7 @@ const { EventEmitter } = require('node:events')
 
 const {
   clearModelRuntimeTestCache,
+  runModelImageMessageTest,
   runModelRuntimeTest,
   runtimeStatusForRef,
   _internal,
@@ -183,6 +184,66 @@ test('runtime status is unverified before a runtime test has run', () => {
   })
 
   assert.equal(status.runtimeStatus, 'runtime_unverified')
+})
+
+test('uploaded image message test passes the selected image file to runtime', async () => {
+  clearModelRuntimeTestCache()
+  const samplePng = 'iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAIAAAACUFjqAAAAFElEQVR4nGP8z4APMOGVhZnhPwMApH0BAbf9u0YAAAAASUVORK5CYII='
+  let inferArgs = null
+  const spawnImpl = spawnFor(args => {
+    if (args.includes('--version')) return { stdout: 'OpenClaw 2026.6.8 (test)\n' }
+    inferArgs = args
+    return {
+      stdout: JSON.stringify({
+        ok: true,
+        provider: 'openrouter',
+        model: 'google/gemini-2.5-flash-lite',
+        outputs: [{ text: 'เห็นรูปสินค้า 1 ชิ้น' }],
+      }),
+    }
+  })
+
+  const result = await runModelImageMessageTest({
+    model: 'openrouter/google/gemini-2.5-flash-lite',
+    prompt: 'รูปนี้คืออะไร',
+    image: { base64: samplePng, mimeType: 'image/png', fileName: 'sample.png' },
+    config: { env: { OPENROUTER_API_KEY: 'sk-or-test' } },
+    spawnImpl,
+  })
+
+  assert.equal(result.ok, true)
+  assert.equal(result.status, 'runtime_verified')
+  assert.equal(result.outputPreview, 'เห็นรูปสินค้า 1 ชิ้น')
+  assert.ok(inferArgs.includes('--file'))
+  assert.equal(inferArgs[inferArgs.indexOf('--prompt') + 1], 'รูปนี้คืออะไร')
+
+  const cached = runtimeStatusForRef('openrouter/google/gemini-2.5-flash-lite', {
+    capability: 'image',
+    config: { env: { OPENROUTER_API_KEY: 'sk-or-test' } },
+  })
+  assert.equal(cached.runtimeStatus, 'runtime_verified')
+})
+
+test('uploaded image message test rejects unsupported payloads before runtime', async () => {
+  clearModelRuntimeTestCache()
+  let spawnCalls = 0
+  const spawnImpl = spawnFor(args => {
+    spawnCalls += 1
+    if (args.includes('--version')) return { stdout: 'OpenClaw 2026.6.8 (test)\n' }
+    return { stdout: '' }
+  })
+
+  const result = await runModelImageMessageTest({
+    model: 'openrouter/google/gemini-2.5-flash-lite',
+    prompt: 'รูปนี้คืออะไร',
+    image: { base64: Buffer.from('not image').toString('base64'), mimeType: 'application/pdf' },
+    config: { env: { OPENROUTER_API_KEY: 'sk-or-test' } },
+    spawnImpl,
+  })
+
+  assert.equal(result.ok, false)
+  assert.equal(result.status, 'not_image_capable')
+  assert.equal(spawnCalls, 1)
 })
 
 test('failure classifier redacts common secret shapes from details', () => {

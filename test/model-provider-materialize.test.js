@@ -100,6 +100,59 @@ test('materializeProviderCatalogsForRefs is a no-op for providers without runtim
   assert.equal(catalogCalls, 0)
 })
 
+test('materializeProviderCatalogsForRefs sanitizes stale Kilo input metadata without refetching catalog', async () => {
+  let catalogCalls = 0
+  const config = {
+    models: {
+      providers: {
+        kilocode: {
+          models: [
+            {
+              id: 'openai/gpt-4o-mini',
+              name: 'OpenAI GPT-4o-mini',
+              input: ['text', 'image', 'audio', 'video'],
+            },
+          ],
+        },
+      },
+    },
+  }
+
+  const result = await materializeProviderCatalogsForRefs(config, ['kilocode/openai/gpt-4o-mini'], {
+    getModelCatalog: async () => {
+      catalogCalls += 1
+      return kiloCatalog([])
+    },
+  })
+
+  assert.equal(result.changed, true)
+  assert.equal(catalogCalls, 0)
+  assert.deepEqual(result.config.models.providers.kilocode.models[0].input, ['text', 'image'])
+})
+
+test('materializeProviderCatalogsForRefs repairs unsupported-only Kilo input metadata', async () => {
+  const config = {
+    models: {
+      providers: {
+        kilocode: {
+          models: [
+            {
+              id: 'vendor/audio-only',
+              name: 'Audio Only',
+              input: ['audio'],
+            },
+          ],
+        },
+      },
+    },
+  }
+
+  const result = await materializeProviderCatalogsForRefs(config, ['kilocode/vendor/audio-only'])
+
+  assert.equal(result.changed, true)
+  assert.deepEqual(result.config.models.providers.kilocode.models[0].input, ['text'])
+})
+
 test('model definition normalization keeps image input and reasoning metadata', () => {
   const model = _internal.toModelDefinition({
     id: 'vendor/vision',

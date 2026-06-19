@@ -174,10 +174,13 @@ function compareVersions(a, b) {
 
 function openclawRuntimeStatus() {
   const startedAt = Date.now()
+  const guardrails = runtimeGuardrailLib.detectRuntimeGuardrails()
+  const activeRuntimeVersion = runtimeGuardrailLib.readRuntimePackageVersion(guardrails.root)
   let installedVersion = null
   try {
     installedVersion = parseOpenclawVersion(execFileSync('openclaw', ['--version'], { timeout: 1000 }).toString())
   } catch {}
+  installedVersion = activeRuntimeVersion || installedVersion
   if (!installedVersion) {
     return makeCheck(
       'runtime.openclaw',
@@ -197,9 +200,13 @@ function openclawRuntimeStatus() {
     'warn',
     behind
       ? `Installed ${installedVersion}; target ${TARGET_OPENCLAW_VERSION}`
-      : `Installed ${installedVersion}`,
+      : `Installed ${installedVersion}${guardrails.source ? ` (${guardrails.source})` : ''}`,
     startedAt,
-    { remediation: behind ? `Update runtime to openclaw@${TARGET_OPENCLAW_VERSION} after source/build verification` : undefined }
+    {
+      runtimeRoot: guardrails.root,
+      runtimeSource: guardrails.source,
+      remediation: behind ? `Update runtime to openclaw@${TARGET_OPENCLAW_VERSION} after source/build verification` : undefined,
+    }
   )
 }
 

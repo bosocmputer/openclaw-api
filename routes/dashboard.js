@@ -178,8 +178,10 @@ function detectRelease(refresh = false) {
 
   const npmRoot = safeExecFile('npm', ['root', '-g'], { timeout: 500 })
   const runtimeRoot = findRuntimeRoot(npmRoot)
+  const runtimeGuardrails = runtimeGuardrailLib.detectRuntimeGuardrails()
+  const activeRuntimeVersion = runtimeGuardrailLib.readRuntimePackageVersion(runtimeGuardrails.root)
   const versionOutput = safeExecFile('openclaw', ['--version'], { timeout: 800 })
-  const installedVersion = parseOpenclawVersion(versionOutput) || readPackageVersion(runtimeRoot)
+  const installedVersion = activeRuntimeVersion || parseOpenclawVersion(versionOutput) || readPackageVersion(runtimeRoot)
   const npmLatestRaw = safeExecFile('npm', ['view', 'openclaw', 'version'], { timeout: 500 })
   const latestVersion = parseOpenclawVersion(npmLatestRaw) || npmLatestRaw || TARGET_OPENCLAW_VERSION
   const targetVersion = TARGET_OPENCLAW_VERSION
@@ -204,7 +206,6 @@ function detectRelease(refresh = false) {
   } catch {}
   if (!deployMetadata) warnings.push('No deploy metadata found for runtime checksums')
 
-  const runtimeGuardrails = runtimeGuardrailLib.detectRuntimeGuardrails()
   const customMarkers = runtimeGuardrails.markers
   const expectsCustomMarkers = Boolean(deployMetadata?.customRuntime || deployMetadata?.customMarkersRequired)
   if (expectsCustomMarkers) {

@@ -119,3 +119,27 @@ test('model definition normalization keeps image input and reasoning metadata', 
   assert.equal(model.cost.input, 1)
   assert.equal(model.cost.output, 2)
 })
+
+test('model definition drops provider input modalities not accepted by runtime catalog schema', () => {
+  const model = _internal.toModelDefinition({
+    id: 'vendor/multimodal',
+    name: 'Multimodal',
+    capabilities: {
+      inputModalities: ['text', 'image', 'audio', 'video', 'tool', 'file'],
+    },
+  }, 'kilocode')
+
+  assert.deepEqual(model.input, ['text', 'image'])
+})
+
+test('model definition falls back to text when provider only advertises unsupported inputs', () => {
+  const model = _internal.toModelDefinition({
+    id: 'vendor/audio-only',
+    name: 'Audio Only',
+    capabilities: {
+      inputModalities: ['audio', 'video'],
+    },
+  }, 'kilocode')
+
+  assert.deepEqual(model.input, ['text'])
+})

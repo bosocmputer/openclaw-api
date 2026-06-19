@@ -8,6 +8,7 @@ const { HOME, CONFIG_PATH } = require('../lib/config')
 const { readOpenclawConfig } = require('../lib/openclaw-config')
 const { buildLatencyFromGatewayLog } = require('../lib/monitor-latency')
 const { getModelReadinessForConfig } = require('../lib/model-readiness')
+const runtimeGuardrailLib = require('../lib/runtime-guardrails')
 const {
   DEFAULT_MCP_URL,
   compareSoulContractToTools,
@@ -294,21 +295,34 @@ function detectRuntimeGuardrails() {
 
 function runtimeGuardrailStatus() {
   const startedAt = Date.now()
-  const result = detectRuntimeGuardrails()
+  const result = runtimeGuardrailLib.detectRuntimeGuardrails()
   const missing = Object.entries(result.markers).filter(([, ok]) => !ok).map(([key]) => key)
+  const smoke = runtimeGuardrailLib.readTelegramSmokeState()
+  const smokeFresh = runtimeGuardrailLib.telegramSmokeIsFresh(smoke)
+  const status = missing.length ? (smokeFresh ? 'info' : 'warn') : 'ok'
+  const severity = missing.length && !smokeFresh ? 'warn' : 'info'
+  const summary = missing.length
+    ? smokeFresh
+      ? `ERP guardrail markers missing (${missing.join(', ')}), but Telegram regression passed at ${smoke.passedAt}`
+      : `Official/custom runtime markers not all present: ${missing.join(', ')}`
+    : 'ERP Telegram guardrail markers present'
   return makeCheck(
     'runtime.guardrails',
     'Runtime ERP guardrails',
-    missing.length ? 'warn' : 'ok',
-    'warn',
-    missing.length
-      ? `Official/custom runtime markers not all present: ${missing.join(', ')}`
-      : 'ERP Telegram guardrail markers present',
+    status,
+    severity,
+    summary,
     startedAt,
     {
       runtimeRoot: result.root,
+      runtimeSource: result.source,
       markers: result.markers,
-      remediation: missing.length
+      candidates: result.candidates?.slice(0, 8),
+      telegramRegression: {
+        passedAt: smoke?.passedAt || null,
+        fresh: smokeFresh,
+      },
+      remediation: missing.length && !smokeFresh
         ? 'Run Telegram regression after runtime updates; deploy custom runtime only if official runtime regresses required ERP chatbot behavior'
         : undefined,
     }

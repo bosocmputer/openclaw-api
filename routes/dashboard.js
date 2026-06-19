@@ -6,6 +6,7 @@ const { HOME } = require('../lib/config')
 const { pgPool } = require('../lib/pg')
 const { readOpenclawConfig } = require('../lib/openclaw-config')
 const { buildLatencyFromGatewayLog } = require('../lib/monitor-latency')
+const runtimeGuardrailLib = require('../lib/runtime-guardrails')
 const systemRoute = require('./system')
 const monitorRoute = require('./monitor')
 
@@ -203,11 +204,15 @@ function detectRelease(refresh = false) {
   } catch {}
   if (!deployMetadata) warnings.push('No deploy metadata found for runtime checksums')
 
-  const customMarkers = detectRuntimeMarkers(runtimeRoot)
+  const runtimeGuardrails = runtimeGuardrailLib.detectRuntimeGuardrails()
+  const customMarkers = runtimeGuardrails.markers
   const expectsCustomMarkers = Boolean(deployMetadata?.customRuntime || deployMetadata?.customMarkersRequired)
   if (expectsCustomMarkers) {
     const missing = Object.entries(customMarkers).filter(([, ok]) => !ok).map(([name]) => name)
-    if (missing.length) warnings.push(`Custom runtime markers missing: ${missing.join(', ')}`)
+    const smoke = runtimeGuardrailLib.readTelegramSmokeState()
+    if (missing.length && !runtimeGuardrailLib.telegramSmokeIsFresh(smoke)) {
+      warnings.push(`Custom runtime markers missing: ${missing.join(', ')}`)
+    }
   }
 
   const data = {
@@ -216,11 +221,13 @@ function detectRelease(refresh = false) {
     targetVersion,
     nodeVersion,
     npmRoot,
-    runtimeRoot,
+    runtimeRoot: runtimeGuardrails.root || runtimeRoot,
+    runtimeSource: runtimeGuardrails.source,
     status,
     warnings,
     deployMetadataPresent: Boolean(deployMetadata),
     customMarkers,
+    runtimeCandidates: runtimeGuardrails.candidates?.slice(0, 8),
     generatedAt: nowIso(),
     cache: { hit: false, ttlSeconds: RELEASE_TTL_MS / 1000 },
   }
@@ -446,6 +453,10 @@ async function buildDashboardOverview({ refresh = false } = {}) {
   const toolOnlyTurns = Object.entries(latencySummary.routeBreakdown)
     .filter(([route]) => route !== 'model_path')
     .reduce((sum, [, count]) => sum + Number(count || 0), 0)
+  const runtimeGuardrails = runtimeGuardrailLib.detectRuntimeGuardrails()
+  const markerMissing = Object.entries(runtimeGuardrails.markers).filter(([, ok]) => !ok).map(([key]) => key)
+  const telegramRegression = runtimeGuardrailLib.readTelegramSmokeState()
+  const telegramRegressionFresh = runtimeGuardrailLib.telegramSmokeIsFresh(telegramRegression)
 
   return systemRoute._internal.redact({
     ok: healthSummary.criticalFail === 0,
@@ -470,6 +481,16 @@ async function buildDashboardOverview({ refresh = false } = {}) {
     },
     agents: buildAgentMatrix(health, config),
     recentTurns: summarizeRecentTurns(conversations),
+    runtimeGuardrails: {
+      root: runtimeGuardrails.root,
+      source: runtimeGuardrails.source,
+      markers: runtimeGuardrails.markers,
+      markerMissing,
+      telegramRegression: telegramRegression ? {
+        ...telegramRegression,
+        fresh: telegramRegressionFresh,
+      } : { passedAt: null, fresh: false },
+    },
     whatsNew: {
       version: `v${TARGET_OPENCLAW_VERSION}`,
       items: WHATS_NEW_ITEMS,
@@ -508,6 +529,18 @@ router.get('/overview', async (req, res) => {
       recentTurns: [],
       whatsNew: { version: `v${TARGET_OPENCLAW_VERSION}`, items: WHATS_NEW_ITEMS },
     })
+  }
+})
+
+router.post('/telegram-regression/pass', async (req, res) => {
+  try {
+    const state = runtimeGuardrailLib.writeTelegramSmokeState({ note: req.body?.note || 'dashboard-confirmed' })
+    overviewCache = null
+    releaseCache = null
+    await systemRoute._internal.getHealth({ refresh: true }).catch(() => null)
+    res.json({ ok: true, state })
+  } catch (e) {
+    res.status(500).json({ ok: false, error: runtimeGuardrailLib.sanitizeError(e) })
   }
 })
 

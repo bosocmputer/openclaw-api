@@ -72,6 +72,65 @@ function withPreparedCatalogFailureHint(result, prepared) {
   }
 }
 
+function parseModelRef(ref) {
+  const raw = String(ref || '').trim()
+  const slash = raw.indexOf('/')
+  if (slash <= 0) return null
+  return {
+    provider: raw.slice(0, slash).toLowerCase(),
+    modelId: raw.slice(slash + 1),
+    ref: raw,
+  }
+}
+
+function modelInputSupportsImage(model) {
+  const caps = model?.capabilities || {}
+  const raw = caps.inputModalities || caps.input_modalities || model?.input || model?.inputModalities
+  if (!Array.isArray(raw)) return null
+  return raw.map(item => String(item || '').toLowerCase()).some(item => item === 'image' || item === 'images' || item === 'vision')
+}
+
+async function resolveCatalogSupportsImage(ref, config) {
+  const parsed = parseModelRef(ref)
+  if (!parsed) return { catalogSupportsImage: null, catalogStatus: 'model_not_found' }
+
+  const configuredModels = config?.models?.providers?.[parsed.provider]?.models
+  if (Array.isArray(configuredModels)) {
+    const configuredModel = configuredModels.find(model => model?.id === parsed.modelId)
+    const configuredSupportsImage = modelInputSupportsImage(configuredModel)
+    if (configuredSupportsImage !== null) {
+      return {
+        catalogSupportsImage: configuredSupportsImage,
+        catalogStatus: 'configured_provider',
+      }
+    }
+  }
+
+  const catalog = await getModelCatalog({ provider: parsed.provider, config })
+  if (catalog.status !== 'ready') {
+    return {
+      catalogSupportsImage: null,
+      catalogStatus: catalog.status,
+    }
+  }
+  const model = (catalog.models || []).find(item => (
+    item.id === parsed.modelId ||
+    `${parsed.provider}/${item.id}` === parsed.ref
+  ))
+  const supportsImage = modelInputSupportsImage(model)
+  return {
+    catalogSupportsImage: supportsImage,
+    catalogStatus: model ? 'ready' : 'model_not_found',
+  }
+}
+
+function defaultChatModelFromConfig(config) {
+  const model = config?.agents?.defaults?.model
+  if (typeof model === 'string') return model.trim()
+  if (model && typeof model === 'object') return String(model.primary || '').trim()
+  return ''
+}
+
 // GET /api/model — อ่าน model ปัจจุบัน
 router.get('/model', (req, res) => {
   try {
@@ -290,12 +349,13 @@ router.post('/models/message-test', async (req, res) => {
   }
 })
 
-// POST /api/models/image-message-test — run an admin-uploaded image prompt through an image runtime model
+// POST /api/models/image-message-test — run an admin-uploaded image prompt through the selected runtime image target
 router.post('/models/image-message-test', async (req, res) => {
   try {
     const config = readOpenclawConfig()
-    const { model, prompt, image } = req.body || {}
-    const modelRef = String(model || '').trim()
+    const { model, prompt, image, targetMode = 'image_model' } = req.body || {}
+    const mode = targetMode === 'chat_model' ? 'chat_model' : 'image_model'
+    const modelRef = String(model || (mode === 'chat_model' ? defaultChatModelFromConfig(config) : '') || '').trim()
     const testPrompt = String(prompt || '').trim()
 
     if (!modelRef) {
@@ -303,11 +363,18 @@ router.post('/models/image-message-test', async (req, res) => {
         ok: false,
         status: 'model_not_found',
         model: modelRef,
+        selectedModel: modelRef || null,
+        targetMode: mode,
+        catalogSupportsImage: null,
+        catalogStatus: null,
+        runtimeStatus: 'model_not_found',
         capability: 'image',
         mode: 'gateway',
         runtimeVersion: 'unknown',
         durationMs: 0,
-        safeMessage: 'กรุณาเลือก Model รูปภาพก่อนทดสอบ',
+        safeMessage: mode === 'chat_model'
+          ? 'ยังไม่ได้เลือก Model หลักสำหรับทดสอบรูปภาพ'
+          : 'กรุณาเลือก Model อ่านรูปแยกก่อนทดสอบ',
       })
     }
     if (!testPrompt) {
@@ -315,6 +382,11 @@ router.post('/models/image-message-test', async (req, res) => {
         ok: false,
         status: 'invalid_output',
         model: modelRef,
+        selectedModel: modelRef,
+        targetMode: mode,
+        catalogSupportsImage: null,
+        catalogStatus: null,
+        runtimeStatus: 'invalid_output',
         capability: 'image',
         mode: 'gateway',
         runtimeVersion: 'unknown',
@@ -327,6 +399,11 @@ router.post('/models/image-message-test', async (req, res) => {
         ok: false,
         status: 'invalid_output',
         model: modelRef,
+        selectedModel: modelRef,
+        targetMode: mode,
+        catalogSupportsImage: null,
+        catalogStatus: null,
+        runtimeStatus: 'invalid_output',
         capability: 'image',
         mode: 'gateway',
         runtimeVersion: 'unknown',
@@ -336,16 +413,23 @@ router.post('/models/image-message-test', async (req, res) => {
     }
 
     const prepared = await prepareRuntimeCatalogsForRefs([modelRef], { reason: 'model-image-test-catalog' })
+    const effectiveConfig = prepared.config || config
+    const capability = await resolveCatalogSupportsImage(modelRef, effectiveConfig)
     const result = await runModelImageMessageTest({
       model: modelRef,
       prompt: testPrompt,
       image,
       capability: 'image',
       mode: 'gateway',
-      config: prepared.config || config,
+      config: effectiveConfig,
     })
     res.json(withPreparedCatalogFailureHint({
       ...result,
+      selectedModel: modelRef,
+      targetMode: mode,
+      runtimeStatus: result.status,
+      catalogSupportsImage: capability.catalogSupportsImage,
+      catalogStatus: capability.catalogStatus,
       catalogPrepared: Boolean(prepared.changed),
       preparedProviders: prepared.preparedProviders || [],
     }, prepared))
@@ -355,11 +439,16 @@ router.post('/models/image-message-test', async (req, res) => {
       ok: false,
       status: 'runtime_unavailable',
       model: String(req.body?.model || ''),
+      selectedModel: String(req.body?.model || '') || null,
+      targetMode: req.body?.targetMode === 'chat_model' ? 'chat_model' : 'image_model',
+      catalogSupportsImage: null,
+      catalogStatus: null,
+      runtimeStatus: 'runtime_unavailable',
       capability: 'image',
       mode: 'gateway',
       runtimeVersion: 'unknown',
       durationMs: 0,
-      safeMessage: 'OpenClaw runtime หรือ gateway ยังไม่พร้อมสำหรับทดสอบ model รูปภาพ',
+      safeMessage: 'OpenClaw runtime หรือ gateway ยังไม่พร้อมสำหรับทดสอบการอ่านรูปสินค้า',
     })
   }
 })

@@ -135,7 +135,7 @@ test('conversation turn is recovered when fallback succeeds after a model timeou
     user: '7548005041',
     channel: 'telegram',
     sessionFile: file,
-    minutes: 1440,
+    minutes: 10080,
   })
 
   assert.equal(turns.length, 1)

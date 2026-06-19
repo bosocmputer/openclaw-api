@@ -55,6 +55,27 @@ test('provider live success returns normalized models and caches result', async 
   assert.equal(calls, 1)
 })
 
+test('Kilo catalog marks kilo auto as text and image capable from documented static fallback metadata', async () => {
+  clearModelCatalogCache()
+  const result = await getModelCatalog({
+    provider: 'kilocode',
+    config: { env: { KILOCODE_API_KEY: 'kc-test' } },
+    fetchImpl: async () => response({
+      body: {
+        data: [
+          {
+            id: 'kilo/auto',
+          },
+        ],
+      },
+    }),
+  })
+
+  assert.equal(result.status, 'ready')
+  assert.equal(result.models[0].id, 'kilo/auto')
+  assert.deepEqual(result.models[0].capabilities.inputModalities, ['text', 'image'])
+})
+
 test('missing key does not call provider and returns explicit missing_key', async () => {
   clearModelCatalogCache()
   let calls = 0

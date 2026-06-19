@@ -87,6 +87,25 @@ test('materializeSelectedProviderCatalogs collects default and agent model refs'
   )
 })
 
+test('materializeProviderCatalogsForRefs adds documented Kilo auto image fallback even when live catalog omits metadata', async () => {
+  const config = {
+    env: { KILOCODE_API_KEY: 'kc-secret-value' },
+    agents: { defaults: { model: { primary: 'kilocode/kilo/auto', fallbacks: [] } }, list: [] },
+  }
+
+  const result = await materializeProviderCatalogsForRefs(config, ['kilocode/kilo/auto'], {
+    getModelCatalog: async () => kiloCatalog([
+      { id: 'openai/gpt-4o-mini', name: 'GPT', capabilities: { inputModalities: ['text'] } },
+    ]),
+  })
+
+  assert.equal(result.changed, true)
+  const auto = result.config.models.providers.kilocode.models.find(model => model.id === 'kilo/auto')
+  assert.ok(auto)
+  assert.deepEqual(auto.input, ['text', 'image'])
+  assert.equal(auto.reasoning, true)
+})
+
 test('materializeProviderCatalogsForRefs is a no-op for providers without runtime defaults', async () => {
   let catalogCalls = 0
   const result = await materializeProviderCatalogsForRefs({}, ['openrouter/openai/gpt-4o-mini'], {

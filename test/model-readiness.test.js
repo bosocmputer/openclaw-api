@@ -77,6 +77,34 @@ test('readiness passes when primary, fallback, and image models exist in live ca
   assert.equal(readiness.agents[0].imageModel.primary.status, 'ready')
 })
 
+test('missing separate imageModel is not a warning when image understanding can use the primary chat model path', async () => {
+  clearModelRuntimeTestCache()
+  const config = {
+    agents: {
+      defaults: {
+        model: {
+          primary: 'openrouter/google/gemini-2.5-flash-lite',
+          fallbacks: [],
+        },
+      },
+      list: [
+        { id: 'stock', workspace: '~/.openclaw/workspace-stock', tools: { allow: ['image'] } },
+      ],
+    },
+  }
+
+  const readiness = await getModelReadinessForConfig(config, {
+    getModelCatalog: catalogLoaderByProvider({
+      openrouter: readyCatalog([
+        { id: 'google/gemini-2.5-flash-lite', name: 'Gemini Lite', capabilities: { inputModalities: ['text', 'image'] } },
+      ]),
+    }),
+  })
+
+  assert.equal(readiness.agents[0].imageModel.configured, false)
+  assert.equal(readiness.warnings.some(item => item.id.includes('model.image.stock')), false)
+})
+
 test('readiness marks runtime verified after a runtime test passes', async () => {
   clearModelRuntimeTestCache()
   const config = {

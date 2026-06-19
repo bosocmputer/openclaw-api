@@ -82,7 +82,7 @@ function redact(value) {
 function summarizeModelReadiness(modelReadiness) {
   if (modelReadiness.ok && !modelReadiness.runtimeVerificationIssues?.length) {
     return {
-      summary: 'Primary, fallback, image, and runtime model checks are ready',
+      summary: 'Primary, fallback, configured image, and runtime model checks are ready',
       remediation: undefined,
     }
   }
@@ -117,7 +117,7 @@ function summarizeModelReadiness(modelReadiness) {
 
   let remediation = 'Open /model, run runtime tests for selected models, validate settings, save, then restart gateway'
   if (hasImageCapabilityIssue) {
-    remediation = 'Open /model and choose an image-capable model that passes runtime test, or disable image config before production image use'
+    remediation = 'Open /model and test image understanding with the primary model, or disable the separate image config before production image use'
   } else if (hasInvalidOutput) {
     remediation = 'Open /model and replace models that return invalid runtime output before saving'
   } else if (hasTimeout) {
@@ -744,10 +744,11 @@ async function buildHealth() {
     const imageReadiness = agentModelReadiness?.imageModel
     const imageModelConfigured = imageReadiness?.configured ?? hasImageModelConfig(config, agent)
     const imageReady = Boolean(imageReadiness?.primary?.status === 'ready')
+    const separateImageNeedsAttention = usesImageTool && imageModelConfigured && !imageReady
     checks.push(makeCheck(
       `model.image.${agent.id}`,
-      `Image model ${agent.id}`,
-      !usesImageTool || imageReady ? 'ok' : 'warn',
+      `Image understanding ${agent.id}`,
+      separateImageNeedsAttention ? 'warn' : 'ok',
       'warn',
       !usesImageTool
         ? 'Agent does not use image tool'
@@ -755,12 +756,12 @@ async function buildHealth() {
           ? `Model readiness unavailable: ${modelReadinessError}`
           : imageModelConfigured
             ? (imageReadiness?.primary?.summary || 'Image model configured but not ready')
-            : 'Image tool uses auto model resolution; invalid model overrides may add latency',
+            : 'No separate image understanding model configured; image understanding can use the primary chat model path',
       imageModelStart,
       {
         readiness: imageReadiness,
-        remediation: usesImageTool && !imageReady
-          ? 'Open /model?section=image and set a known image-capable model'
+        remediation: separateImageNeedsAttention
+          ? 'Open /model?section=image and test the selected image understanding model, or disable the separate image setting'
           : undefined,
       }
     ))

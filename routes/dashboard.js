@@ -197,8 +197,10 @@ function detectRelease(refresh = false) {
     warnings.push('Unable to detect installed OpenClaw runtime version')
   }
   if (!nodeVersionOk(nodeVersion)) warnings.push(`Node ${nodeVersion} is below >=${MIN_NODE_VERSION}`)
-  if (!runtimeRoot) warnings.push('Global openclaw runtime path not found')
-  if (!npmLatestRaw) warnings.push(`npm latest lookup unavailable; using target ${targetVersion}`)
+  if (!runtimeRoot && !runtimeGuardrails.root) warnings.push('Global openclaw runtime path not found')
+  if (!npmLatestRaw && (!installedVersion || compareVersions(installedVersion, targetVersion) < 0)) {
+    warnings.push(`npm latest lookup unavailable; using target ${targetVersion}`)
+  }
 
   let deployMetadata = null
   try {

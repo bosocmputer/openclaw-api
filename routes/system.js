@@ -843,8 +843,8 @@ async function buildHealth() {
     checks.push(makeCheck(
       'telemetry.telegram',
       'Telegram telemetry',
-      hasRecentMarkers ? 'ok' : 'warn',
-      'warn',
+      hasRecentMarkers ? 'ok' : 'info',
+      'info',
       hasRecentMarkers
         ? `${latency.summary.count} Telegram turn marker(s) found in the last 30 minutes`
         : 'No Telegram latency markers found in the recent gateway log window',

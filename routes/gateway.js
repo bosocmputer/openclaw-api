@@ -4,6 +4,7 @@ const path = require('path')
 const { exec } = require('child_process')
 const { HOME, execOpts } = require('../lib/config')
 const { readUserNames } = require('../lib/files')
+const { restartGateway } = require('../lib/gateway-restart')
 
 // cleanStaleSessions — ลบ sessions ที่ทำให้ webchat ตอบผ่าน LINE ผิดช่อง
 // 1. key=*:main ที่มี lastChannel=line (gateway fallback session)
@@ -52,16 +53,19 @@ function scheduleDailyClean() {
 scheduleDailyClean()
 
 // POST /api/gateway/restart — restart gateway
-router.post('/restart', (req, res) => {
+router.post('/restart', async (req, res) => {
   cleanStaleSessions()
-  exec(
-    'openclaw gateway restart',
-    execOpts,
-    (err) => {
-      if (err) return res.status(500).json({ error: err.message })
-      res.json({ ok: true })
-    }
-  )
+  try {
+    const result = await restartGateway({ execOptions: execOpts })
+    res.json({ ok: true, ...result })
+  } catch (err) {
+    res.status(500).json({
+      error: err.message,
+      method: err.method,
+      stdout: err.stdout,
+      stderr: err.stderr,
+    })
+  }
 })
 
 // GET /api/gateway/logs — ดู gateway log ล่าสุด (parse JSONL format)

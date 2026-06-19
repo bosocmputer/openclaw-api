@@ -359,9 +359,12 @@ router.post('/models/message-test', async (req, res) => {
 router.post('/models/image-message-test', async (req, res) => {
   try {
     const config = readOpenclawConfig()
-    const { model, prompt, image, targetMode = 'image_model' } = req.body || {}
+    const { model, fallbacks = [], prompt, image, targetMode = 'image_model' } = req.body || {}
     const mode = targetMode === 'chat_model' ? 'chat_model' : 'image_model'
     const modelRef = String(model || (mode === 'chat_model' ? defaultChatModelFromConfig(config) : '') || '').trim()
+    const fallbackModels = Array.isArray(fallbacks)
+      ? fallbacks.map(item => String(item || '').trim()).filter(Boolean)
+      : []
     const testPrompt = String(prompt || '').trim()
 
     if (!modelRef) {
@@ -418,24 +421,87 @@ router.post('/models/image-message-test', async (req, res) => {
       })
     }
 
-    const prepared = await prepareRuntimeCatalogsForRefs([modelRef], { reason: 'model-image-test-catalog', capability: 'image' })
+    const models = [modelRef, ...fallbackModels]
+      .filter((item, index, arr) => item && arr.indexOf(item) === index)
+    const prepared = await prepareRuntimeCatalogsForRefs(models, { reason: 'model-image-test-catalog', capability: 'image' })
     const effectiveConfig = prepared.config || config
-    const capability = await resolveCatalogSupportsImage(modelRef, effectiveConfig)
-    const result = await runModelImageMessageTest({
+    const startedAt = Date.now()
+    const attempts = []
+    let passed = null
+
+    for (const candidate of models) {
+      const imageCapability = await resolveCatalogSupportsImage(candidate, effectiveConfig)
+      const result = await runModelImageMessageTest({
+        model: candidate,
+        prompt: testPrompt,
+        image,
+        capability: 'image',
+        mode: 'gateway',
+        config: effectiveConfig,
+      })
+      const hinted = withPreparedCatalogFailureHint(result, prepared)
+      const attempt = {
+        model: candidate,
+        ok: result.ok,
+        status: result.ok ? 'runtime_verified' : result.status,
+        durationMs: result.durationMs,
+        safeMessage: hinted.safeMessage || result.safeMessage || result.summary,
+        outputPreview: result.outputPreview || null,
+        runtimeVersion: result.runtimeVersion || null,
+        catalogSupportsImage: imageCapability.catalogSupportsImage,
+        catalogStatus: imageCapability.catalogStatus,
+      }
+      attempts.push(attempt)
+      if (result.ok) {
+        passed = { result, attempt, imageCapability }
+        break
+      }
+    }
+
+    const totalDurationMs = Date.now() - startedAt
+    if (passed) {
+      const selectedModel = passed.attempt.model
+      const usedFallback = selectedModel !== modelRef
+      return res.json({
+        ...passed.result,
+        ok: true,
+        status: 'runtime_verified',
+        selectedModel,
+        targetMode: mode,
+        runtimeStatus: 'runtime_verified',
+        catalogSupportsImage: passed.imageCapability.catalogSupportsImage,
+        catalogStatus: passed.imageCapability.catalogStatus,
+        catalogPrepared: Boolean(prepared.changed),
+        preparedProviders: prepared.preparedProviders || [],
+        durationMs: totalDurationMs,
+        outputPreview: passed.result.outputPreview || null,
+        attempts,
+        safeMessage: usedFallback
+          ? 'Model หลักอ่านรูปไม่ผ่าน แต่ Model สำรองอ่านรูปได้สำเร็จ'
+          : passed.result.safeMessage,
+      })
+    }
+
+    const failed = attempts.find(item => !item.ok) || attempts[0]
+    res.json(withPreparedCatalogFailureHint({
+      ok: false,
+      status: failed?.status || 'provider_error',
       model: modelRef,
-      prompt: testPrompt,
-      image,
+      selectedModel: null,
+      targetMode: mode,
+      runtimeStatus: failed?.status || 'provider_error',
       capability: 'image',
       mode: 'gateway',
-      config: effectiveConfig,
-    })
-    res.json(withPreparedCatalogFailureHint({
-      ...result,
-      selectedModel: modelRef,
-      targetMode: mode,
-      runtimeStatus: result.status,
-      catalogSupportsImage: capability.catalogSupportsImage,
-      catalogStatus: capability.catalogStatus,
+      runtimeVersion: failed?.runtimeVersion || 'unknown',
+      durationMs: totalDurationMs,
+      summary: failed?.safeMessage || 'Image model test failed',
+      safeMessage: models.length > 1
+        ? 'ทดสอบอ่านรูปไม่ผ่านทุก Model ที่เลือกไว้'
+        : failed?.safeMessage || 'Runtime อ่านรูปด้วย model นี้ไม่ได้',
+      outputPreview: failed?.outputPreview || null,
+      attempts,
+      catalogSupportsImage: failed?.catalogSupportsImage ?? null,
+      catalogStatus: failed?.catalogStatus ?? null,
       catalogPrepared: Boolean(prepared.changed),
       preparedProviders: prepared.preparedProviders || [],
     }, prepared))

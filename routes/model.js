@@ -41,7 +41,7 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
-async function prepareRuntimeCatalogsForRefs(refs, { reason = 'model-runtime-test-catalog' } = {}) {
+async function prepareRuntimeCatalogsForRefs(refs, { reason = 'model-runtime-test-catalog', capability = 'text' } = {}) {
   const selectedRefs = [...new Set((refs || []).map(item => String(item || '').trim()).filter(Boolean))]
   if (!selectedRefs.length) {
     return { changed: false, preparedProviders: [], warnings: [], config: readOpenclawConfig() }
@@ -49,7 +49,10 @@ async function prepareRuntimeCatalogsForRefs(refs, { reason = 'model-runtime-tes
 
   const result = await withConfigLock(async () => {
     const current = readOpenclawConfig()
-    const materialized = await materializeProviderCatalogsForRefs(current, selectedRefs, { refresh: true })
+    const materialized = await materializeProviderCatalogsForRefs(current, selectedRefs, {
+      refresh: true,
+      capability,
+    })
     if (!materialized.changed) return materialized
     const write = writeOpenclawConfigAtomic(materialized.config, { reason })
     readinessCache = null
@@ -63,7 +66,10 @@ async function prepareRuntimeCatalogsForRefs(refs, { reason = 'model-runtime-tes
 }
 
 function withPreparedCatalogFailureHint(result, prepared) {
-  if (!prepared?.changed || result?.status !== 'model_not_found') return result
+  if (
+    !prepared?.changed ||
+    !['model_not_found', 'not_image_capable'].includes(result?.status)
+  ) return result
   return {
     ...result,
     safeMessage: 'เตรียม catalog ให้ OpenClaw แล้ว แต่ gateway ยังไม่โหลดค่าใหม่ กรุณา Restart Gateway แล้วทดสอบอีกครั้ง',
@@ -215,7 +221,7 @@ router.post('/models/runtime-test', async (req, res) => {
         error: 'only gateway runtime tests are supported',
       })
     }
-    const prepared = await prepareRuntimeCatalogsForRefs([model], { reason: 'model-runtime-test-catalog' })
+    const prepared = await prepareRuntimeCatalogsForRefs([model], { reason: 'model-runtime-test-catalog', capability })
     const result = await runModelRuntimeTest({
       model,
       capability,
@@ -334,7 +340,7 @@ router.post('/models/message-test', async (req, res) => {
       preparedProviders: prepared.preparedProviders || [],
       safeMessage: models.length > 1
         ? 'Model หลักและ Model สำรองที่เลือกไว้ทดสอบผ่าน'
-        : 'Model หลักทดสอบผ่าน',
+        : 'Model นี้ทดสอบผ่าน',
     })
   } catch (e) {
     console.error('[openclaw-api]', req.method, req.path, e.message)
@@ -412,7 +418,7 @@ router.post('/models/image-message-test', async (req, res) => {
       })
     }
 
-    const prepared = await prepareRuntimeCatalogsForRefs([modelRef], { reason: 'model-image-test-catalog' })
+    const prepared = await prepareRuntimeCatalogsForRefs([modelRef], { reason: 'model-image-test-catalog', capability: 'image' })
     const effectiveConfig = prepared.config || config
     const capability = await resolveCatalogSupportsImage(modelRef, effectiveConfig)
     const result = await runModelImageMessageTest({

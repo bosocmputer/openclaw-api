@@ -14,6 +14,7 @@ test('gateway restart defaults to pm2 before falling back to openclaw CLI', () =
   assert.equal(result.method, 'pm2_or_openclaw')
   assert.match(result.command, /bash -lc/)
   assert.match(DEFAULT_RESTART_SCRIPT, /pm2 restart openclaw-gateway --update-env/)
+  assert.match(DEFAULT_RESTART_SCRIPT, /pm2 restart openclaw-gateway --update-env \|\| openclaw gateway restart/)
   assert.match(DEFAULT_RESTART_SCRIPT, /openclaw gateway restart/)
 })
 

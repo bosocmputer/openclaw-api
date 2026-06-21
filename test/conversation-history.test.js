@@ -90,6 +90,31 @@ test('conversation issue tagging detects search no-result from real tool evidenc
   assert.equal(issues.find(issue => issue.tag === 'search_no_result').reviewTarget, 'MCP/search')
 })
 
+test('conversation issue tagging does not treat needs_refine as search no-result', () => {
+  const issues = history._internal.deriveIssues({
+    id: 'turn-refine',
+    userText: 'ของเดนโซ่ หรือ hitachi',
+    finalText: 'กรุณาระบุรุ่นหรือรหัสสินค้าเพิ่มเติมครับ',
+    route: 'tool_path',
+    intent: 'search',
+    status: 'ok',
+    durationMs: 1200,
+  }, [{
+    type: 'tool',
+    title: 'stock__search_product',
+    body: '{"schema_version":"search_product.v2","status":"needs_refine","keyword":"brand query","candidates":[]}',
+    payload: {
+      name: 'stock__search_product',
+      status: 'ok',
+      result: '{"schema_version":"search_product.v2","status":"needs_refine","keyword":"brand query","candidates":[]}',
+    },
+  }])
+
+  const tags = issues.map(issue => issue.tag)
+  assert.ok(tags.includes('needs_user_refine'))
+  assert.ok(!tags.includes('search_no_result'))
+})
+
 test('conversation issue tagging detects model timeout, fallback, and slow turns', () => {
   const issues = history._internal.deriveIssues({
     id: 'turn-model',

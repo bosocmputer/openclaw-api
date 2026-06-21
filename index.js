@@ -15,6 +15,7 @@ const { pgPool } = require('./lib/pg')
 const { router: alertingRouter, startAlertWatcher } = require('./routes/alerting')
 const { router: gatewayRouter, usernamesRouter, doctorRouter } = require('./routes/gateway')
 const { router: monitorRouter, agentSessionsRouter } = require('./routes/monitor')
+const conversationHistory = require('./lib/conversation-history')
 
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || null
 app.use(helmet())
@@ -55,6 +56,7 @@ app.use('/api/doctor',    doctorRouter)
 app.use('/api/members',   require('./routes/members'))
 app.use('/api/webchat',   require('./routes/webchat').router)
 app.use('/api/monitor',   monitorRouter)
+app.use('/api/analysis',  require('./routes/analysis'))
 app.use('/api/agents',    agentSessionsRouter)            // mounts /api/agents/:id/sessions/*
 app.use('/api/alerting',  alertingRouter)
 app.use('/api/webhooks',  require('./routes/webhooks'))
@@ -64,6 +66,7 @@ app.use('/api/sale-orders', require('./routes/sale-orders'))
 
 // ─── Alert watcher ────────────────────────────────────────────────────────────
 startAlertWatcher()
+conversationHistory.startWorker()
 
 // ─── Server ───────────────────────────────────────────────────────────────────
 const server = app.listen(PORT, '0.0.0.0', () => {

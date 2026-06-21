@@ -31,6 +31,15 @@ router.get('/conversations/ingest-status', requirePg, async (req, res) => {
   }
 })
 
+router.get('/conversations/insights', requirePg, async (req, res) => {
+  try {
+    res.json(await history.queryInsights(req.query))
+  } catch (e) {
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(e.statusCode || 500).json({ error: e.statusCode ? e.message : 'Internal server error' })
+  }
+})
+
 router.post('/conversations/backfill', requirePg, async (req, res) => {
   try {
     const days = Math.min(Math.max(Number.parseInt(String(req.body?.days || '7'), 10) || 7, 1), 31)
@@ -53,7 +62,8 @@ router.post('/conversations/backfill', requirePg, async (req, res) => {
 
 router.get('/conversations/export', requirePg, async (req, res) => {
   try {
-    const format = String(req.query.format || 'csv').toLowerCase()
+    const mode = String(req.query.mode || 'raw').toLowerCase()
+    const format = String(req.query.format || (mode === 'codex_review_pack' ? 'markdown' : mode === 'issues_csv' ? 'csv' : mode === 'events_jsonl' ? 'jsonl' : 'csv')).toLowerCase()
     const exported = await history.exportConversations(req.query, format, adminActor(req))
     res.setHeader('Content-Type', exported.contentType)
     res.setHeader('Content-Disposition', `attachment; filename="${exported.filename}"`)

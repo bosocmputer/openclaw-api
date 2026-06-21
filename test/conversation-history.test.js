@@ -64,3 +64,77 @@ test('conversation export guardrail constants are conservative', () => {
   assert.equal(history._internal.MAX_EXPORT_DAYS, 31)
   assert.equal(history._internal.MAX_EXPORT_TURNS, 50000)
 })
+
+test('conversation issue tagging detects search no-result from real tool evidence', () => {
+  const issues = history._internal.deriveIssues({
+    id: 'turn-search',
+    userText: 'ค้นหาสินค้า TEST',
+    finalText: 'ไม่พบสินค้าที่ตรงกับคำค้นนี้ครับ',
+    route: 'tool_path',
+    intent: 'search',
+    status: 'ok',
+    durationMs: 900,
+  }, [{
+    type: 'tool',
+    title: 'stock__search_product',
+    body: '{"status":"no_result","keyword":"TEST","candidates":[]}',
+    payload: {
+      name: 'stock__search_product',
+      status: 'ok',
+      input: { keyword: 'TEST' },
+      result: { status: 'no_result', keyword: 'TEST', candidates: [] },
+    },
+  }])
+
+  assert.ok(issues.some(issue => issue.tag === 'search_no_result'))
+  assert.equal(issues.find(issue => issue.tag === 'search_no_result').reviewTarget, 'MCP/search')
+})
+
+test('conversation issue tagging detects model timeout, fallback, and slow turns', () => {
+  const issues = history._internal.deriveIssues({
+    id: 'turn-model',
+    userText: 'สวัสดี',
+    finalText: 'Model/provider timeout or finish_reason error',
+    route: 'model_path',
+    intent: 'unknown',
+    status: 'error',
+    rootCause: 'provider timeout',
+    durationMs: 15000,
+    model: 'openrouter/example/model',
+  }, [{
+    type: 'warning',
+    title: 'model_fallback_decision',
+    body: 'Model Fallback selected because primary timed out',
+    payload: { reason: 'timeout' },
+  }])
+
+  const tags = issues.map(issue => issue.tag)
+  assert.ok(tags.includes('model_timeout'))
+  assert.ok(tags.includes('fallback_used'))
+  assert.ok(tags.includes('slow_turn'))
+})
+
+test('conversation issue evidence is redacted', () => {
+  const issues = history._internal.deriveIssues({
+    id: 'turn-secret',
+    userText: 'ค้นหา TEST',
+    finalText: 'ไม่พบสินค้า',
+    route: 'tool_path',
+    intent: 'search',
+    status: 'ok',
+  }, [{
+    type: 'tool',
+    title: 'search_product',
+    body: 'authorization: Bearer should-not-leak',
+    payload: {
+      name: 'search_product',
+      status: 'error',
+      input: { keyword: 'TEST', apiKey: 'sk-secret' },
+      result: { error: 'no_result' },
+    },
+  }])
+
+  const serialized = JSON.stringify(issues)
+  assert.doesNotMatch(serialized, /should-not-leak|sk-secret/)
+  assert.match(serialized, /\[redacted\]/)
+})

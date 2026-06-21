@@ -9,6 +9,7 @@ test('stock template does not instruct unavailable price tool calls', () => {
 
   assert.match(soul, /MCP_ACCESS_MODE=stock/)
   assert.match(soul, /workflowContract=stock-flow-v1/)
+  assert.match(soul, /responseContract=grounded-reply-v1/)
   assert.match(soul, /Tools ที่ใช้ได้/)
   assert.match(soul, /ไม่มีสิทธิ์ตรวจราคา/)
   assert.match(soul, /ห้ามเรียก search_product หรือ tool อื่นเพื่ออ้อมไปหาราคา/)
@@ -43,6 +44,32 @@ test('stock template enforces stock balance workflow after single product match'
   assert.match(soul, /ห้ามปนภาษาอังกฤษในคำตอบสุดท้าย/)
   assert.match(soul, /ห้ามใส่รายการ follow-up ยาว/)
   assert.match(soul, /native command ที่ระบบจัดการเองแล้ว.*ห้ามตอบซ้ำ/)
+})
+
+test('template grounds answers in tool results and avoids generic market estimates', () => {
+  const soul = generateSoulTemplate(null, 'admin', null, 'professional')
+
+  assert.match(soul, /ผลลัพธ์จาก tool เป็น source of truth/)
+  assert.match(soul, /ห้ามเติมจากความรู้ทั่วไป ความจำ ราคาตลาด/)
+  assert.match(soul, /ห้ามใช้คำว่า "ราคาโดยประมาณ"/)
+  assert.match(soul, /status เช่น needs_refine, ambiguous, no_result, found:0/)
+  assert.match(soul, /ถามข้อมูลเพิ่มสั้น ๆ หนึ่งข้อ/)
+  assert.match(soul, /ห้ามเรียก tool เดิมด้วย keyword เดิมหรือใกล้เคียงกันเกิน 2 ครั้ง/)
+  assert.match(soul, /ใช้สิ่งที่อ่านได้จากรูปเป็น keyword หรือ context สำหรับค้นเท่านั้น/)
+  assert.match(soul, /ห้ามลงท้ายซ้ำ เช่น "ครับครับ"/)
+})
+
+test('template search guidance is generic and avoids business-specific examples', () => {
+  const soul = generateSoulTemplate(null, 'general', null, 'professional')
+
+  assert.match(soul, /ยี่ห้อ ผู้ผลิต รุ่น ประเภทสินค้า หรือรหัส/)
+  assert.match(soul, /retry ได้ไม่เกิน 1 ครั้ง/)
+  assert.match(soul, /ห้ามค้นแยกทีละคำจนได้รายการไม่เกี่ยวข้องจำนวนมาก/)
+  assert.doesNotMatch(soul, /หลอดไฟ/i)
+  assert.doesNotMatch(soul, /kotto/i)
+  assert.doesNotMatch(soul, /civic/i)
+  assert.doesNotMatch(soul, /denso/i)
+  assert.doesNotMatch(soul, /hitachi/i)
 })
 
 test('stock template allows search pagination only when schema exposes page or offset', () => {

@@ -114,6 +114,9 @@ router.get('/:id/soul/template', async (req, res) => {
     if (accessMode === 'stock' && !/workflowContract=stock-flow-v1\b/.test(soul)) {
       warnings.push('Template missing stock-flow-v1 workflow contract')
     }
+    if (!/responseContract=grounded-reply-v1\b/.test(soul)) {
+      warnings.push('Template missing grounded-reply-v1 response contract')
+    }
     res.json({
       soul,
       accessMode,

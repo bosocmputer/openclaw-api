@@ -474,9 +474,13 @@ function soulStatus(agent, tools = []) {
       toolNames.has('search_product') &&
       toolNames.has('get_stock_balance') &&
       !/workflowContract=stock-flow-v1\b/.test(soul)
+    const groundingContractMissing = !/responseContract=grounded-reply-v1\b/.test(soul)
     const workflowWarnings = stockFlowMissing
       ? ['SOUL missing stock-flow-v1 workflow contract']
       : []
+    if (groundingContractMissing) {
+      workflowWarnings.push('SOUL missing grounded-reply-v1 response contract')
+    }
     const warnings = [
       ...legacyPatterns.map(p => `legacy pattern: ${p}`),
       ...contractStatus.warnings,

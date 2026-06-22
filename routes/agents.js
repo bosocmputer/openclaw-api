@@ -6,6 +6,7 @@ const { readOpenclawConfig, writeOpenclawConfigAtomic } = require('../lib/opencl
 const { readUserNames, writeUserNames } = require('../lib/files')
 const { generateSoulTemplate } = require('../lib/soul-template')
 const { getMcpTools } = require('../lib/mcp-tools')
+const businessProfiles = require('../lib/business-profiles')
 
 // ─── openclaw mcp helpers — ใช้ openclaw.json mcp.servers โดยตรง ───────────────
 function _readOcJson() {
@@ -109,8 +110,22 @@ router.get('/:id/soul/template', async (req, res) => {
     const refreshTools = req.query.refreshTools === 'true'
     const toolResult = await getMcpTools({ accessMode: requestedAccessMode, mcpUrl, refresh: refreshTools })
     const accessMode = toolResult.accessMode
-    const soul = generateSoulTemplate(workspaceTilde, accessMode, mcpUrl, persona, toolResult)
+    let businessProfileState = null
+    let businessProfileWarning = null
+    try {
+      businessProfileState = await businessProfiles.getAgentBusinessProfileSafe(req.params.id)
+    } catch (err) {
+      businessProfileWarning = `Business Profile unavailable: ${err.message}`
+    }
+    const businessProfileSoulBlock = businessProfileState?.profile
+      ? businessProfiles.buildBusinessProfileSoulBlock(businessProfileState.profile)
+      : ''
+    const soul = generateSoulTemplate(workspaceTilde, accessMode, mcpUrl, persona, {
+      ...toolResult,
+      businessProfileSoulBlock,
+    })
     const warnings = [...(toolResult.warnings || [])]
+    if (businessProfileWarning) warnings.push(businessProfileWarning)
     if (accessMode === 'stock' && !/workflowContract=stock-flow-v1\b/.test(soul)) {
       warnings.push('Template missing stock-flow-v1 workflow contract')
     }
@@ -127,12 +142,30 @@ router.get('/:id/soul/template', async (req, res) => {
       capabilities: toolResult.capabilities,
       deniedCapabilities: toolResult.deniedCapabilities,
       warnings,
+      businessProfile: businessProfileState?.profile || null,
+      businessProfileHash: businessProfileState?.profile?.soulBlockHash || null,
+      businessProfileApplied: businessProfileState?.isApplied || false,
       generatedAt: toolResult.generatedAt,
       cache: toolResult.cache,
     })
   } catch (e) {
     console.error('[openclaw-api]', req.method, req.path, e.message)
     res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// GET /api/agents/:id/business-profile — profile ที่ผูกกับ agent และสถานะ apply
+router.get('/:id/business-profile', async (req, res) => {
+  try {
+    const config = readOpenclawConfig()
+    const agent = config.agents?.list?.find(a => a.id === req.params.id)
+    if (!agent) return res.status(404).json({ error: 'Agent not found' })
+    const state = await businessProfiles.getAgentBusinessProfile(req.params.id)
+    res.json(state || { profile: null, link: null, isApplied: false })
+  } catch (e) {
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    const status = e.status || 500
+    res.status(status).json({ error: status >= 500 ? 'Internal server error' : e.message })
   }
 })
 
@@ -168,7 +201,7 @@ router.get('/:id/soul', (req, res) => {
 })
 
 // PUT /api/agents/:id/soul — เขียน SOUL.md
-router.put('/:id/soul', (req, res) => {
+router.put('/:id/soul', async (req, res) => {
   try {
     if (typeof req.body.soul !== 'string')
       return res.status(400).json({ error: 'soul must be a string' })
@@ -184,6 +217,13 @@ router.put('/:id/soul', (req, res) => {
       }
     }
     fs.writeFileSync(soulPath, req.body.soul)
+    const profileHash = businessProfiles.extractBusinessProfileHashFromSoul(req.body.soul)
+    if (profileHash) {
+      const state = await businessProfiles.getAgentBusinessProfileSafe(req.params.id)
+      if (state?.profile?.soulBlockHash === profileHash) {
+        await businessProfiles.markAgentBusinessProfileApplied(req.params.id, profileHash)
+      }
+    }
     res.json({ ok: true })
   } catch (e) {
     console.error('[openclaw-api]', req.method, req.path, e.message)

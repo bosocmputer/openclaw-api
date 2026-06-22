@@ -63,6 +63,7 @@ app.use('/api/webhooks',  require('./routes/webhooks'))
 app.use('/api/compaction', require('./routes/compaction'))
 app.use('/api/memory',    require('./routes/memory'))
 app.use('/api/sale-orders', require('./routes/sale-orders'))
+app.use('/api/business-profiles', require('./routes/business-profiles'))
 
 // ─── Alert watcher ────────────────────────────────────────────────────────────
 startAlertWatcher()

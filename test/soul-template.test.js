@@ -3,6 +3,7 @@ const test = require('node:test')
 
 const { generateSoulTemplate } = require('../lib/soul-template')
 const { getFallbackTools, parseSoulContract } = require('../lib/mcp-tools')
+const { buildBusinessProfileSoulBlock } = require('../lib/business-profiles')
 
 test('stock template does not instruct unavailable price tool calls', () => {
   const soul = generateSoulTemplate(null, 'stock', null, 'professional')
@@ -115,6 +116,23 @@ test('template contract allowed tools match tool source', () => {
   assert.equal(contract.accessMode, 'stock')
   assert.equal(contract.toolSource, 'fallback')
   assert.deepEqual(contract.allowedTools, tools.map(t => t.name).sort())
+})
+
+test('template injects bounded business profile before MCP tool contract', () => {
+  const businessProfileSoulBlock = buildBusinessProfileSoulBlock({
+    id: '00000000-0000-4000-8000-000000000001',
+    soulBlockHash: 'profilehash1234',
+    soulBlock: '## Business Profile\nธุรกิจ: ธุรกิจตัวอย่าง\n\nแนวทางตอบ:\n- ห้ามเดาข้อมูลถ้า tool ไม่ยืนยัน',
+  })
+  const soul = generateSoulTemplate(null, 'general', null, 'professional', {
+    businessProfileSoulBlock,
+  })
+
+  assert.match(soul, /OPENCLAW_BUSINESS_PROFILE/)
+  assert.match(soul, /## Business Profile/)
+  assert.ok(soul.indexOf('## Business Profile') > soul.indexOf('## บุคลิก'))
+  assert.ok(soul.indexOf('## Business Profile') < soul.indexOf('## MCP Tool Contract'))
+  assert.match(soul, /ห้ามเดาข้อมูลถ้า tool ไม่ยืนยัน/)
 })
 
 test('all default templates avoid legacy MCP invocation patterns', () => {

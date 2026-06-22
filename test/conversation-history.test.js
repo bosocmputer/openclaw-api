@@ -139,6 +139,63 @@ test('conversation issue tagging detects model timeout, fallback, and slow turns
   assert.ok(tags.includes('slow_turn'))
 })
 
+test('conversation issue tagging detects unverified price guesses and reply repetition', () => {
+  const issues = history._internal.deriveIssues({
+    id: 'turn-price-guess',
+    agentId: 'admin',
+    channel: 'telegram',
+    userText: 'สายพาน 6PK1995 ราคา',
+    finalText: 'โดยปกติราคาประมาณ 850 บาทครับครับ',
+    route: 'tool_path',
+    intent: 'price',
+    status: 'ok',
+    durationMs: 1200,
+  }, [{
+    type: 'tool',
+    title: 'admin__search_product',
+    body: '{"status":"no_result","keyword":"6PK1995","candidates":[]}',
+    payload: {
+      name: 'admin__search_product',
+      status: 'ok',
+      result: { status: 'no_result', keyword: '6PK1995', candidates: [] },
+    },
+  }])
+
+  const tags = issues.map(issue => issue.tag)
+  assert.ok(tags.includes('unverified_price_guess'))
+  assert.ok(tags.includes('reply_repetition'))
+  assert.ok(tags.includes('wrong_agent_or_capability'))
+})
+
+test('conversation issue tagging detects multi-item search retry loops', () => {
+  const events = [1, 2, 3].map(i => ({
+    type: 'tool',
+    title: 'stock__search_product',
+    body: JSON.stringify({ status: i === 3 ? 'needs_refine' : 'no_result', keyword: `item-${i}`, candidates: [] }),
+    payload: {
+      name: 'stock__search_product',
+      status: 'ok',
+      input: { keyword: `item-${i}` },
+      result: { status: i === 3 ? 'needs_refine' : 'no_result', candidates: [] },
+    },
+  }))
+  const issues = history._internal.deriveIssues({
+    id: 'turn-loop',
+    agentId: 'stock',
+    channel: 'telegram',
+    userText: 'ผ้าเบรก, สายพาน และ ลูกรอก ราคา',
+    finalText: 'กรุณาระบุข้อมูลเพิ่มเติมครับ',
+    route: 'tool_path',
+    intent: 'search',
+    status: 'ok',
+    durationMs: 25000,
+  }, events)
+
+  const tags = issues.map(issue => issue.tag)
+  assert.ok(tags.includes('search_retry_loop'))
+  assert.ok(tags.includes('multi_item_slow'))
+})
+
 test('conversation issue evidence is redacted', () => {
   const issues = history._internal.deriveIssues({
     id: 'turn-secret',

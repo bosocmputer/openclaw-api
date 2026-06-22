@@ -13,6 +13,16 @@ test('business profile templates use production-facing names', () => {
   ])
 })
 
+test('automotive business profile stays short and avoids duplicating tool contracts', () => {
+  const automotive = businessProfiles.getTemplates().find(template => template.templateId === 'automotive-parts-retail-service')
+  assert.ok(automotive)
+  assert.ok(automotive.soulBlock.length < 900)
+  assert.match(automotive.soulBlock, /ตำแหน่งที่พบบ่อย/)
+  assert.match(automotive.soulBlock, /รหัสสินค้า/)
+  assert.doesNotMatch(automotive.soulBlock, /ห้ามเดา/)
+  assert.doesNotMatch(automotive.soulBlock, /tool ไม่ยืนยัน/)
+})
+
 test('business profile validation rejects long soul blocks and secret-like values', () => {
   assert.throws(() => businessProfiles.normalizeProfileInput({
     name: 'Long',

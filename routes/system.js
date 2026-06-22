@@ -475,11 +475,25 @@ function soulStatus(agent, tools = []) {
       toolNames.has('get_stock_balance') &&
       !/workflowContract=stock-flow-v1\b/.test(soul)
     const groundingContractMissing = !/responseContract=grounded-reply-v1\b/.test(soul)
+    const commerceToolNames = new Set([
+      'search_product',
+      'get_product_price',
+      'get_stock_balance',
+      'get_bookout_balance',
+      'get_account_incoming',
+      'get_account_outstanding',
+      'create_sale_reserve',
+    ])
+    const hasCommerceTools = Array.from(toolNames).some(name => commerceToolNames.has(name))
+    const commerceGuardrailMissing = hasCommerceTools && !/commerceGuardrail=commerce-guardrails-v1\b/.test(soul)
     const workflowWarnings = stockFlowMissing
       ? ['SOUL missing stock-flow-v1 workflow contract']
       : []
     if (groundingContractMissing) {
       workflowWarnings.push('SOUL missing grounded-reply-v1 response contract')
+    }
+    if (commerceGuardrailMissing) {
+      workflowWarnings.push('SOUL missing commerce-guardrails-v1 contract')
     }
     const warnings = [
       ...legacyPatterns.map(p => `legacy pattern: ${p}`),
@@ -509,6 +523,26 @@ function telegramAccounts(config) {
     accounts.push({ id: 'default', token: tg.botToken })
   }
   return accounts
+}
+
+function telegramBindingIntentWarnings(config) {
+  const warnings = []
+  const accountIds = new Set(Object.keys(config.channels?.telegram?.accounts || {}))
+  if (config.channels?.telegram?.botToken) accountIds.add('default')
+  const routeBindings = (config.bindings || []).filter(
+    binding => binding?.type === 'route' && binding.match?.channel === 'telegram'
+  )
+  for (const binding of routeBindings) {
+    const accountId = String(binding.match?.accountId || 'default')
+    const agentId = String(binding.agentId || '')
+    if (!accountIds.has(accountId) || !agentId) continue
+    const taskSpecificAccount = /(stock|inventory|price|sale|sales|order|คลัง|สต็อก|ราคา|ขาย)/i.test(accountId)
+    const broadAgent = /^(admin|general)$/i.test(agentId)
+    if (taskSpecificAccount && broadAgent) {
+      warnings.push({ accountId, agentId })
+    }
+  }
+  return warnings
 }
 
 function recentToolLoopWarnings(config) {
@@ -815,6 +849,25 @@ async function buildHealth() {
   }))
 
   const tgAccounts = telegramAccounts(config)
+  const bindingStart = Date.now()
+  const bindingWarnings = telegramBindingIntentWarnings(config)
+  checks.push(makeCheck(
+    'telegram.binding.intent',
+    'Telegram binding intent',
+    bindingWarnings.length ? 'warn' : 'ok',
+    'warn',
+    bindingWarnings.length
+      ? `${bindingWarnings.length} task-specific Telegram bot(s) are routed to broad agents`
+      : 'Telegram route bindings match their apparent account intent',
+    bindingStart,
+    {
+      warnings: bindingWarnings,
+      remediation: bindingWarnings.length
+        ? 'Open Telegram settings and confirm whether these bots should route to stock/sale-specific agents instead of admin/general'
+        : undefined,
+    }
+  ))
+
   const tgStart = Date.now()
   if (tgAccounts.length === 0) {
     checks.push(makeCheck('telegram.api', 'Telegram API', 'info', 'warn', 'No Telegram bot token configured', tgStart))

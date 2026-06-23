@@ -21,6 +21,11 @@ const MAX_CONVERSATION_TEXT = 1200
 const MAX_MONITOR_TOOL_TEXT = 5000
 const MAX_GATEWAY_MONITOR_TURNS = 80
 const DEFAULT_GATEWAY_LOG_DIR = '/tmp/openclaw'
+const MAX_MEDIA_PREVIEW_BYTES = 10 * 1024 * 1024
+const MEDIA_PREVIEW_TTL_MS = 15 * 60 * 1000
+const MEDIA_PREVIEW_ENABLED = process.env.MONITOR_MEDIA_PREVIEW_ENABLED === '1'
+const PREVIEW_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
+const mediaPreviewRegistry = new Map()
 
 function readTailLines(filePath, maxLines, maxBytes = MAX_TAIL_BYTES) {
   const stat = fs.statSync(filePath)
@@ -143,6 +148,196 @@ function nativeCommandReply(command) {
 
 function safeSnippet(value, max = MAX_CONVERSATION_TEXT) {
   return String(value || '').replace(/\s+/g, ' ').trim().slice(0, max)
+}
+
+function normalizeMimeType(value) {
+  const raw = String(value || '').trim().toLowerCase()
+  if (raw === 'image/jpg') return 'image/jpeg'
+  return raw
+}
+
+function inferMimeType(filePath, fallback) {
+  const fromFallback = normalizeMimeType(fallback)
+  if (fromFallback) return fromFallback
+  const ext = path.extname(String(filePath || '')).toLowerCase()
+  if (ext === '.png') return 'image/png'
+  if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg'
+  if (ext === '.webp') return 'image/webp'
+  if (ext === '.gif') return 'image/gif'
+  return 'application/octet-stream'
+}
+
+function safeFileName(value, filePath) {
+  const raw = String(value || '').trim()
+  if (raw && !raw.includes('/') && !raw.includes('\\')) return raw.slice(0, 160)
+  return path.basename(String(filePath || 'media')).slice(0, 160)
+}
+
+function expandHomePath(value) {
+  const raw = String(value || '')
+  if (raw === '~') return HOME
+  if (raw.startsWith('~/')) return path.join(HOME, raw.slice(2))
+  if (raw.startsWith('file://')) {
+    try {
+      return new URL(raw).pathname
+    } catch {
+      return raw.replace(/^file:\/\//, '')
+    }
+  }
+  return raw
+}
+
+function resolveAllowedMediaRoots() {
+  const roots = [path.join(HOME, '.openclaw')]
+  try {
+    const config = readOpenclawConfig()
+    for (const agent of config?.agents?.list || []) {
+      if (agent?.workspace) roots.push(expandHomePath(agent.workspace))
+    }
+  } catch {}
+  return Array.from(new Set(roots.map(root => {
+    try { return fs.realpathSync(root) } catch { return null }
+  }).filter(Boolean)))
+}
+
+function resolvePreviewPath(candidatePath) {
+  if (!MEDIA_PREVIEW_ENABLED || !candidatePath) return null
+  const expanded = expandHomePath(candidatePath)
+  if (!path.isAbsolute(expanded)) return null
+  let real
+  try {
+    real = fs.realpathSync(expanded)
+  } catch {
+    return null
+  }
+  const roots = resolveAllowedMediaRoots()
+  if (!roots.some(root => real === root || real.startsWith(root + path.sep))) return null
+  let stat
+  try {
+    stat = fs.statSync(real)
+  } catch {
+    return null
+  }
+  if (!stat.isFile() || stat.size <= 0 || stat.size > MAX_MEDIA_PREVIEW_BYTES) return null
+  return { path: real, sizeBytes: stat.size, mtimeMs: stat.mtimeMs }
+}
+
+function pruneMediaPreviewRegistry(now = Date.now()) {
+  for (const [id, item] of mediaPreviewRegistry.entries()) {
+    if (!item?.createdAt || now - item.createdAt > MEDIA_PREVIEW_TTL_MS) {
+      mediaPreviewRegistry.delete(id)
+    }
+  }
+}
+
+function registerPreviewMedia({ filePath, mimeType, fileName, caption }) {
+  const resolved = resolvePreviewPath(filePath)
+  if (!resolved) return null
+  const normalizedMime = inferMimeType(resolved.path, mimeType)
+  if (!PREVIEW_IMAGE_MIME_TYPES.has(normalizedMime)) return null
+  pruneMediaPreviewRegistry()
+  const secret = process.env.API_TOKEN || 'openclaw-monitor-media'
+  const id = cryptoHash(`${secret}:${resolved.path}:${resolved.sizeBytes}:${resolved.mtimeMs}`)
+  mediaPreviewRegistry.set(id, {
+    path: resolved.path,
+    mimeType: normalizedMime,
+    sizeBytes: resolved.sizeBytes,
+    fileName: safeFileName(fileName, resolved.path),
+    caption: safeSnippet(caption || '', 500),
+    createdAt: Date.now(),
+  })
+  return id
+}
+
+function cryptoHash(value) {
+  return require('crypto').createHash('sha256').update(String(value)).digest('hex').slice(0, 48)
+}
+
+function looksLikeLocalMediaPath(value) {
+  const raw = String(value || '')
+  if (!raw || raw.length > 600) return false
+  if (raw.startsWith('media://') || raw.startsWith('http://') || raw.startsWith('https://')) return false
+  if (raw.startsWith('/') || raw.startsWith('~/') || raw.startsWith('file://')) return /\.(png|jpe?g|webp|gif)$/i.test(raw)
+  return false
+}
+
+function extractMediaCandidates(value, depth = 0, seen = new Set()) {
+  if (!value || depth > 6) return []
+  if (typeof value === 'string') {
+    if (looksLikeLocalMediaPath(value)) return [{ path: value }]
+    if (/^media:\/\//i.test(value)) return [{ ref: value }]
+    return []
+  }
+  if (typeof value !== 'object') return []
+  if (seen.has(value)) return []
+  seen.add(value)
+
+  const candidates = []
+  if (Array.isArray(value)) {
+    for (const item of value.slice(0, 40)) candidates.push(...extractMediaCandidates(item, depth + 1, seen))
+    return candidates
+  }
+
+  const type = String(value.type || value.kind || value.mediaType || value.mimeType || value.mime_type || '').toLowerCase()
+  const mimeType = normalizeMimeType(value.mimeType || value.mime_type || value.contentType || value.content_type)
+  const pathValue = value.path || value.filePath || value.file_path || value.localPath || value.local_path || value.source || value.url || value.uri || value.href
+  const refValue = value.ref || value.mediaRef || value.media_ref || value.id
+  const fileName = value.fileName || value.file_name || value.filename || value.name
+  const sizeBytes = firstFiniteNumber(value.sizeBytes, value.size_bytes, value.fileSize, value.file_size, value.bytes)
+  const caption = value.caption || value.text || value.alt
+  const objectLooksLikeMedia = /image|photo|media|attachment|file/.test(type) || String(mimeType).startsWith('image/') || looksLikeLocalMediaPath(pathValue) || /^media:\/\//i.test(String(pathValue || refValue || ''))
+
+  if (objectLooksLikeMedia) {
+    candidates.push({
+      path: looksLikeLocalMediaPath(pathValue) ? pathValue : null,
+      ref: /^media:\/\//i.test(String(pathValue || '')) ? pathValue : /^media:\/\//i.test(String(refValue || '')) ? refValue : null,
+      mimeType,
+      fileName,
+      sizeBytes,
+      caption,
+      type,
+    })
+  }
+
+  for (const [key, child] of Object.entries(value)) {
+    if (/token|authorization|api[_-]?key|secret|password|botToken|file_id|fileId/i.test(key)) continue
+    if (objectLooksLikeMedia && /^(ref|mediaRef|media_ref|id|path|filePath|file_path|localPath|local_path|source|url|uri|href|fileName|file_name|filename|name|mimeType|mime_type|contentType|content_type|caption|text|alt)$/i.test(key)) continue
+    if (/attachments|attachment|media|images|image|files|file|content|parts|items|data/i.test(key)) {
+      candidates.push(...extractMediaCandidates(child, depth + 1, seen))
+    }
+  }
+  return candidates
+}
+
+function normalizeMediaFromMessage(msg) {
+  const candidates = extractMediaCandidates(msg?.content)
+  const byKey = new Map()
+  for (const candidate of candidates) {
+    const mimeType = inferMimeType(candidate.path, candidate.mimeType)
+    const id = candidate.path ? registerPreviewMedia({
+      filePath: candidate.path,
+      mimeType,
+      fileName: candidate.fileName,
+      caption: candidate.caption,
+    }) : null
+    const item = {
+      id: id || null,
+      kind: mimeType.startsWith('image/') || /image|photo/.test(String(candidate.type || '')) ? 'image' : 'file',
+      mimeType,
+      fileName: candidate.fileName ? safeFileName(candidate.fileName, candidate.path) : candidate.path ? safeFileName('', candidate.path) : undefined,
+      sizeBytes: id ? mediaPreviewRegistry.get(id)?.sizeBytes : candidate.sizeBytes,
+      caption: candidate.caption ? safeSnippet(candidate.caption, 500) : undefined,
+      hasPreview: Boolean(id),
+      previewUrl: id ? `/api/monitor/media/${id}` : undefined,
+    }
+    const key = item.id || `${item.mimeType}:${item.fileName || ''}:${item.caption || ''}:${candidate.ref || ''}`
+    if (!byKey.has(key)) byKey.set(key, item)
+  }
+  return Array.from(byKey.values()).slice(0, 8)
+}
+
+function hasMediaPlaceholder(text) {
+  return /\[user sent media|media without caption|<media:|media attached|attached image|รูปภาพ|ส่งรูป/i.test(String(text || ''))
 }
 
 function firstFiniteNumber(...values) {
@@ -278,6 +473,13 @@ function readSessionText(msg) {
   return safeSnippet(stripGatewayMetadata(extractMessageText(msg)))
 }
 
+function monitorTextForUserMessage(msg) {
+  const text = readSessionText(msg)
+  if (text) return text
+  const media = normalizeMediaFromMessage(msg)
+  return media.length ? '[User sent media without caption]' : ''
+}
+
 function parseSessionChannelUser(key) {
   if (key.includes('hook:webchat')) {
     const parts = key.split(':')
@@ -392,6 +594,8 @@ function buildConversationTurnsFromGatewayLog({ minutes, agent, channel, limit, 
         }
       }),
       warnings: [],
+      media: [],
+      mediaCount: Number.isFinite(Number(kv.media)) ? Math.max(0, Number(kv.media)) : hasMediaPlaceholder(decodeMonitorText(kv.userTextB64)) ? 1 : 0,
     })
   }
   return turns.slice(-limit)
@@ -597,6 +801,7 @@ function buildConversationTurnsFromSession(params) {
 
     if (msg.role === 'user') {
       pushCurrent()
+      const media = normalizeMediaFromMessage(msg)
       current = {
         id: `${sessionKey}:${ts || turns.length}`,
         source: 'session',
@@ -606,7 +811,7 @@ function buildConversationTurnsFromSession(params) {
         agentId,
         channel,
         user,
-        userText: readSessionText(msg),
+        userText: monitorTextForUserMessage(msg),
         finalText: '',
         route: 'model_path',
         intent: 'unknown',
@@ -617,6 +822,8 @@ function buildConversationTurnsFromSession(params) {
         modelMs: null,
         toolPath: [],
         warnings: [],
+        media,
+        mediaCount: media.length,
       }
       continue
     }
@@ -876,6 +1083,33 @@ router.get('/latency', (req, res) => {
   }
 })
 
+// GET /api/monitor/media/:mediaId — authenticated preview for media observed in monitor/session payloads.
+router.get('/media/:mediaId', (req, res) => {
+  try {
+    if (!MEDIA_PREVIEW_ENABLED) return res.status(404).json({ error: 'Media preview is disabled' })
+    pruneMediaPreviewRegistry()
+    const mediaId = String(req.params.mediaId || '')
+    if (!/^[a-f0-9]{32,64}$/i.test(mediaId)) return res.status(404).json({ error: 'Media not found' })
+    const item = mediaPreviewRegistry.get(mediaId)
+    if (!item) return res.status(404).json({ error: 'Media preview is not available for this log entry' })
+    const resolved = resolvePreviewPath(item.path)
+    if (!resolved || resolved.path !== item.path) return res.status(404).json({ error: 'Media preview is not available' })
+    const mimeType = inferMimeType(item.path, item.mimeType)
+    if (!PREVIEW_IMAGE_MIME_TYPES.has(mimeType)) return res.status(415).json({ error: 'Unsupported media preview type' })
+    res.setHeader('Content-Type', mimeType)
+    res.setHeader('Content-Length', String(resolved.sizeBytes))
+    res.setHeader('Cache-Control', 'private, no-store')
+    res.setHeader('X-Content-Type-Options', 'nosniff')
+    fs.createReadStream(item.path).on('error', () => {
+      if (!res.headersSent) res.status(404).end()
+      else res.destroy()
+    }).pipe(res)
+  } catch (e) {
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
 // GET /api/monitor/conversations — operator-first turn feed across model and deterministic paths
 router.get('/conversations', async (req, res) => {
   try {
@@ -1115,6 +1349,9 @@ router.get('/events', async (req, res) => {
             const textItem = c.find(x => x.type === 'text')
             if (textItem) lastUserText = stripGatewayMetadata(textItem.text).slice(0, 300)
           }
+          if (!lastUserText && normalizeMediaFromMessage(lastUserMsg).length) {
+            lastUserText = '[User sent media without caption]'
+          }
         }
 
         // Extract last reply text
@@ -1179,7 +1416,9 @@ router.get('/events', async (req, res) => {
               const t = c.find(x => x.type === 'text')
               if (t) text = stripGatewayMetadata(t.text)
             }
-            if (text) events.push({ ...msgTime, ts: tsFormatted, type: 'message', text })
+            const media = normalizeMediaFromMessage(msg)
+            if (!text && media.length) text = '[User sent media without caption]'
+            if (text || media.length) events.push({ ...msgTime, ts: tsFormatted, type: 'message', text, media })
             if (channel === 'telegram' && text) {
               seenModelTexts.add(`${agentId}|${safeSnippet(text, 600)}`)
             }
@@ -1357,6 +1596,7 @@ router.get('/events', async (req, res) => {
             cleanKeyword: ev.cleanKeyword,
             intent: ev.intent,
             route: ev.route,
+            media: ev.media,
             model: ev.model,
             provider: ev.provider,
             modelSource: ev.modelSource,
@@ -1724,6 +1964,9 @@ module.exports = {
     extractMessageText,
     isDeliveryMirrorMessage,
     normalizeSessionEntry,
+    normalizeMediaFromMessage,
+    registerPreviewMedia,
+    resolvePreviewPath,
     shouldIncludeMonitorMessage,
     extractToolResultText,
     messageModelMetadata,

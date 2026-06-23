@@ -290,3 +290,59 @@ test('gateway deterministic tool details are attached to conversation turns', ()
   assert.match(turns[0].toolPath[0].toolInput, /"keyword":"สินค้า"/)
   assert.match(turns[0].toolPath[0].toolResult, /ITEM-001/)
 })
+
+test('monitor extracts media metadata without exposing preview paths by default', () => {
+  const media = _internal.normalizeMediaFromMessage({
+    role: 'user',
+    content: [
+      { type: 'text', text: 'ช่วยดูรูปนี้' },
+      {
+        type: 'image',
+        mimeType: 'image/png',
+        mediaRef: 'media://telegram/file-redacted',
+        fileName: 'product.png',
+        sizeBytes: 12345,
+      },
+    ],
+  })
+
+  assert.equal(media.length, 1)
+  assert.equal(media[0].kind, 'image')
+  assert.equal(media[0].mimeType, 'image/png')
+  assert.equal(media[0].fileName, 'product.png')
+  assert.equal(media[0].sizeBytes, 12345)
+  assert.equal(media[0].hasPreview, false)
+  assert.equal(media[0].previewUrl, undefined)
+})
+
+test('media-only user messages become conversation turns with a safe placeholder', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'openclaw-monitor-media-'))
+  const file = path.join(dir, 'session.jsonl')
+  const lines = [
+    {
+      role: 'user',
+      timestamp: '2026-06-18T03:25:33.824Z',
+      content: [{ type: 'image', mimeType: 'image/jpeg', mediaRef: 'media://telegram/file-redacted', fileName: 'photo.jpg' }],
+    },
+    {
+      role: 'assistant',
+      timestamp: '2026-06-18T03:25:38.585Z',
+      content: [{ type: 'text', text: 'ผมเห็นรูปแล้วครับ' }],
+    },
+  ]
+  fs.writeFileSync(file, lines.map(line => JSON.stringify(line)).join('\n'))
+
+  const turns = _internal.buildConversationTurnsFromSession({
+    agentId: 'stock',
+    sessionKey: 'agent:stock:telegram:7548005041',
+    user: '7548005041',
+    channel: 'telegram',
+    sessionFile: file,
+    minutes: 10080,
+  })
+
+  assert.equal(turns.length, 1)
+  assert.equal(turns[0].userText, '[User sent media without caption]')
+  assert.equal(turns[0].mediaCount, 1)
+  assert.equal(turns[0].media[0].fileName, 'photo.jpg')
+})

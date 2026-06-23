@@ -7,6 +7,7 @@ const { execFileSync } = require('child_process')
 const { HOME, CONFIG_PATH } = require('../lib/config')
 const { readOpenclawConfig } = require('../lib/openclaw-config')
 const { buildLatencyFromGatewayLog } = require('../lib/monitor-latency')
+const { buildLineDeliveryTelemetry } = require('../lib/line-delivery-telemetry')
 const { getModelReadinessForConfig } = require('../lib/model-readiness')
 const runtimeGuardrailLib = require('../lib/runtime-guardrails')
 const businessProfiles = require('../lib/business-profiles')
@@ -674,6 +675,82 @@ async function lineWebhookStatus(config) {
   )
 }
 
+function lineTelemetryStatus(config) {
+  const startedAt = Date.now()
+  const accounts = lineAccounts(config)
+  if (!accounts.length) {
+    return makeCheck('telemetry.line', 'LINE delivery telemetry', 'info', 'info', 'No LINE OA account configured', startedAt)
+  }
+
+  try {
+    const telemetry = buildLineDeliveryTelemetry({ minutes: 30, maxLines: 1500, maxBytes: 1024 * 1024 })
+    const { summary } = telemetry
+    if (summary.failedCount > 0) {
+      return makeCheck(
+        'telemetry.line',
+        'LINE delivery telemetry',
+        'warn',
+        'warn',
+        `${summary.failedCount} LINE delivery/loading failure marker(s) found in the last 30 minutes`,
+        startedAt,
+        {
+          warnings: telemetry.events
+            .filter(event => event.marker === 'line_delivery_failed' || event.marker === 'line_loading_failed')
+            .slice(0, 8)
+            .map((event, index) => ({
+              id: `telemetry.line.failed.${index}`,
+              accountId: event.accountId,
+              status: 'failed',
+              summary: `${event.text}${event.durationMs != null ? ` (${event.durationMs}ms)` : ''}`,
+            })),
+          remediation: 'Open Monitor to inspect LINE reply/push/loading markers, then retest the LINE OA',
+        }
+      )
+    }
+
+    if (summary.count > 0) {
+      return makeCheck(
+        'telemetry.line',
+        'LINE delivery telemetry',
+        'ok',
+        'info',
+        `${summary.count} LINE marker(s) found in the last 30 minutes`,
+        startedAt,
+        {
+          accepted: telemetry.events.slice(0, 8).map((event, index) => ({
+            id: `telemetry.line.${index}`,
+            accountId: event.accountId,
+            status: event.marker,
+            key: event.method || event.marker,
+            acknowledgedAt: event.timestamp,
+            note: event.text,
+          })),
+        }
+      )
+    }
+
+    return makeCheck(
+      'telemetry.line',
+      'LINE delivery telemetry',
+      'info',
+      'info',
+      'No LINE delivery markers found in the recent gateway log window',
+      startedAt,
+      { remediation: 'Send a LINE test message after restart, then refresh System or open Monitor' }
+    )
+  } catch (e) {
+    return makeCheck(
+      'telemetry.line',
+      'LINE delivery telemetry',
+      'warn',
+      'warn',
+      sanitizeError(e),
+      startedAt,
+      { remediation: 'Check /tmp/openclaw gateway logs and runtime LINE telemetry markers' }
+    )
+  }
+}
+
 function recentStalledMediaSessions(logDir = '/tmp/openclaw') {
   const logFile = latestGatewayLogFile(logDir)
   if (!logFile) return []
@@ -1154,6 +1231,7 @@ async function buildHealth() {
   }
 
   checks.push(await lineWebhookStatus(config))
+  checks.push(lineTelemetryStatus(config))
 
   const telemetryStart = Date.now()
   try {
@@ -1362,6 +1440,7 @@ module.exports._internal = {
   parseOpenclawVersion,
   lineAccounts,
   lineWebhookStatus,
+  lineTelemetryStatus,
   nativeCapabilitiesForAgent,
   recentStalledMediaSessions,
   soulStatus,

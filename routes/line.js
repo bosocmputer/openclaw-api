@@ -5,6 +5,9 @@ const { exec } = require('child_process')
 const { HOME, execOpts } = require('../lib/config')
 const { readOpenclawConfig, writeOpenclawConfigAtomic } = require('../lib/openclaw-config')
 
+const DELIVERY_STATS_TTL_MS = 5 * 60 * 1000
+const deliveryStatsCache = new Map()
+
 async function fetchLineBotInfo(token) {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), 5000)
@@ -21,6 +24,67 @@ async function fetchLineBotInfo(token) {
   } finally {
     clearTimeout(timer)
   }
+}
+
+function todayLineStatsDate() {
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Bangkok' }).replace(/-/g, '')
+}
+
+function resolveLineAccountToken(config, accountId) {
+  const line = config.channels?.line || {}
+  if (accountId && accountId !== 'default') {
+    const account = line.accounts?.[accountId]
+    return account?.channelAccessToken ? { accountId, token: account.channelAccessToken } : null
+  }
+  if (line.accounts?.default?.channelAccessToken) {
+    return { accountId: 'default', token: line.accounts.default.channelAccessToken }
+  }
+  if (line.channelAccessToken) {
+    return { accountId: 'default', token: line.channelAccessToken }
+  }
+  if (!accountId) {
+    const first = Object.entries(line.accounts || {}).find(([, account]) => account?.channelAccessToken)
+    if (first) return { accountId: first[0], token: first[1].channelAccessToken }
+  }
+  return null
+}
+
+async function fetchLineJson(url, token, timeoutMs = 2500) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const response = await fetch(url, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: controller.signal,
+    })
+    let json = null
+    try { json = await response.json() } catch { json = null }
+    if (!response.ok) {
+      return {
+        ok: false,
+        status: response.status,
+        reason: json?.message || `HTTP ${response.status}`,
+      }
+    }
+    return { ok: true, status: response.status, json }
+  } catch (e) {
+    return { ok: false, status: null, reason: String(e?.message || e || 'request failed').slice(0, 180) }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+function countFromLineStats(json) {
+  if (!json || typeof json !== 'object') return null
+  for (const key of ['success', 'totalUsage', 'value']) {
+    if (Number.isFinite(Number(json[key]))) return Number(json[key])
+  }
+  return null
+}
+
+function safeStatsResult(result, countMapper = countFromLineStats) {
+  if (!result.ok) return { status: 'unavailable', reason: result.reason || `HTTP ${result.status || '-'}` }
+  return { status: 'ok', ...(result.json || {}), count: countMapper(result.json) }
 }
 
 // GET /api/line — อ่าน LINE config ปัจจุบัน
@@ -55,6 +119,75 @@ router.get('/botinfo', async (req, res) => {
   } catch (e) {
     console.error('[openclaw-api]', req.method, req.path, e.message)
     res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// GET /api/line/delivery-stats?accountId=&date=YYYYMMDD — LINE delivery/quota insight
+router.get('/delivery-stats', async (req, res) => {
+  try {
+    const date = String(req.query.date || todayLineStatsDate()).trim()
+    const accountId = String(req.query.accountId || '').trim()
+    if (!/^\d{8}$/.test(date)) {
+      return res.status(400).json({ ok: false, error: 'date must be YYYYMMDD' })
+    }
+
+    const config = readOpenclawConfig()
+    const resolved = resolveLineAccountToken(config, accountId)
+    if (!resolved) {
+      return res.status(404).json({
+        ok: false,
+        status: 'unavailable',
+        safeMessage: accountId ? `LINE account "${accountId}" is not configured` : 'No LINE account configured',
+      })
+    }
+
+    const cacheKey = `${resolved.accountId}:${date}`
+    const cached = deliveryStatsCache.get(cacheKey)
+    if (cached && Date.now() - cached.createdAt < DELIVERY_STATS_TTL_MS) {
+      return res.json({
+        ...cached.data,
+        cache: {
+          hit: true,
+          ttlSeconds: Math.ceil((DELIVERY_STATS_TTL_MS - (Date.now() - cached.createdAt)) / 1000),
+        },
+      })
+    }
+
+    const token = resolved.token
+    const [quota, consumption, reply, push] = await Promise.all([
+      fetchLineJson('https://api.line.me/v2/bot/message/quota', token),
+      fetchLineJson('https://api.line.me/v2/bot/message/quota/consumption', token),
+      fetchLineJson(`https://api.line.me/v2/bot/message/delivery/reply?date=${date}`, token),
+      fetchLineJson(`https://api.line.me/v2/bot/message/delivery/push?date=${date}`, token),
+    ])
+
+    const unavailable = [quota, consumption, reply, push].filter(result => !result.ok)
+    const data = {
+      ok: true,
+      status: unavailable.length === 4 ? 'unavailable' : 'ok',
+      accountId: resolved.accountId,
+      date,
+      quota: safeStatsResult(quota, json => Number.isFinite(Number(json?.value)) ? Number(json.value) : null),
+      consumption: safeStatsResult(consumption, json => Number.isFinite(Number(json?.totalUsage)) ? Number(json.totalUsage) : null),
+      reply: safeStatsResult(reply),
+      push: safeStatsResult(push),
+      checkedAt: new Date().toISOString(),
+      safeMessage: unavailable.length
+        ? 'LINE stats บางรายการยังไม่พร้อมหรืออ่านไม่ได้ แต่ไม่กระทบการรับส่งข้อความ'
+        : 'LINE delivery stats loaded',
+      cache: { hit: false, ttlSeconds: DELIVERY_STATS_TTL_MS / 1000 },
+    }
+    deliveryStatsCache.set(cacheKey, { createdAt: Date.now(), data })
+    res.json(data)
+  } catch (e) {
+    console.error('[openclaw-api]', req.method, req.path, e.message)
+    res.status(200).json({
+      ok: true,
+      status: 'unavailable',
+      safeMessage: 'LINE stats unavailable',
+      reason: String(e?.message || e || 'unknown error').slice(0, 180),
+      checkedAt: new Date().toISOString(),
+    })
   }
 })
 

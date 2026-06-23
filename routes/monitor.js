@@ -8,6 +8,7 @@ const { pgPool } = require('../lib/pg')
 const { stripGatewayMetadata } = require('./webchat')
 const { readOpenclawConfig } = require('../lib/openclaw-config')
 const { buildLatencyFromGatewayLog } = require('../lib/monitor-latency')
+const { buildLineDeliveryTelemetry } = require('../lib/line-delivery-telemetry')
 
 const MAX_TAIL_BYTES = 1024 * 1024
 const MAX_EVENTS_LINES = 80
@@ -1689,6 +1690,10 @@ router.get('/events', async (req, res) => {
     totalMessages += gatewayMonitor.stats.messages
     errors += gatewayMonitor.stats.errors
     responseTimes.push(...gatewayMonitor.stats.responseTimes)
+
+    const lineTelemetry = buildLineDeliveryTelemetry({ minutes: 60, maxLines: 1500, maxBytes: 1024 * 1024 })
+    globalEvents.push(...lineTelemetry.events.slice(0, 80))
+    errors += lineTelemetry.summary.failedCount
 
     // Sort by full timestamp, not only HH:mm:ss, so cross-day logs stay in order.
     sortMonitorEventsDesc(globalEvents)

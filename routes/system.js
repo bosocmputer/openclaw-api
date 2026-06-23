@@ -9,6 +9,8 @@ const { readOpenclawConfig } = require('../lib/openclaw-config')
 const { buildLatencyFromGatewayLog } = require('../lib/monitor-latency')
 const { getModelReadinessForConfig } = require('../lib/model-readiness')
 const runtimeGuardrailLib = require('../lib/runtime-guardrails')
+const businessProfiles = require('../lib/business-profiles')
+const { NATIVE_MEDIA_CONTRACT_ID } = require('../lib/soul-template')
 const {
   DEFAULT_MCP_URL,
   compareSoulContractToTools,
@@ -146,6 +148,27 @@ function readTailLines(filePath, maxLines, maxBytes = 256 * 1024) {
     return buffer.toString('utf8').split('\n').filter(Boolean).slice(-maxLines)
   } finally {
     fs.closeSync(fd)
+  }
+}
+
+function latestGatewayLogFile(logDir = '/tmp/openclaw') {
+  try {
+    if (!fs.existsSync(logDir)) return null
+    const files = fs.readdirSync(logDir)
+      .filter(name => name.endsWith('.log') || name.endsWith('.jsonl'))
+      .map(name => {
+        try {
+          const fullPath = path.join(logDir, name)
+          return { fullPath, mtime: fs.statSync(fullPath).mtimeMs }
+        } catch {
+          return null
+        }
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.mtime - a.mtime)
+    return files[0]?.fullPath || null
+  } catch {
+    return null
   }
 }
 
@@ -447,6 +470,12 @@ function agentUsesImageTool(agent) {
   return Array.isArray(allow) && allow.includes('image')
 }
 
+function nativeCapabilitiesForAgent(agent) {
+  const out = []
+  if (agentUsesImageTool(agent)) out.push('image')
+  return out
+}
+
 function hasImageModelConfig(config, agent) {
   return Boolean(
     agent?.imageModel ||
@@ -487,6 +516,9 @@ function soulStatus(agent, tools = []) {
     ])
     const hasCommerceTools = Array.from(toolNames).some(name => commerceToolNames.has(name))
     const commerceGuardrailMissing = hasCommerceTools && !/commerceGuardrail=commerce-guardrails-v1\b/.test(soul)
+    const nativeCapabilities = nativeCapabilitiesForAgent(agent)
+    const nativeMediaRequired = nativeCapabilities.includes('image')
+    const nativeMediaMissing = nativeMediaRequired && !new RegExp(`nativeMediaContract=${NATIVE_MEDIA_CONTRACT_ID}\\b`).test(soul)
     const workflowWarnings = stockFlowMissing
       ? ['SOUL missing stock-flow-v1 workflow contract']
       : []
@@ -495,6 +527,9 @@ function soulStatus(agent, tools = []) {
     }
     if (commerceGuardrailMissing) {
       workflowWarnings.push('SOUL missing commerce-guardrails-v1 contract')
+    }
+    if (nativeMediaMissing) {
+      workflowWarnings.push('SOUL missing native image/media contract')
     }
     const warnings = [
       ...legacyPatterns.map(p => `legacy pattern: ${p}`),
@@ -507,10 +542,153 @@ function soulStatus(agent, tools = []) {
       contract,
       contractWarnings: contractStatus.warnings,
       workflowWarnings,
+      nativeCapabilities,
+      nativeMediaStatus: nativeMediaRequired
+        ? (nativeMediaMissing ? 'missing' : 'ok')
+        : 'not_required',
       summary: warnings.length ? warnings.join('; ') : 'SOUL contract matches MCP tools',
     }
   } catch {
-    return { status: 'fail', legacyPatterns: [], contractWarnings: [], workflowWarnings: [], summary: 'SOUL.md not found' }
+    return {
+      status: 'fail',
+      legacyPatterns: [],
+      contractWarnings: [],
+      workflowWarnings: [],
+      nativeCapabilities: nativeCapabilitiesForAgent(agent),
+      nativeMediaStatus: agentUsesImageTool(agent) ? 'missing' : 'not_required',
+      summary: 'SOUL.md not found',
+    }
+  }
+}
+
+function lineAccounts(config) {
+  const line = config.channels?.line || {}
+  const accounts = []
+  for (const [id, acc] of Object.entries(line.accounts || {})) {
+    if (acc?.channelAccessToken) accounts.push({ id, webhookPath: acc.webhookPath || `/line/webhook/${id}` })
+  }
+  if (!accounts.some(account => account.id === 'default') && line.channelAccessToken) {
+    accounts.push({ id: 'default', webhookPath: line.webhookPath || '/line/webhook/default' })
+  }
+  return accounts
+}
+
+function readCloudflaredPublicUrl() {
+  for (const filePath of ['/tmp/cloudflared.log', '/tmp/openclaw/cloudflared.log']) {
+    try {
+      if (!fs.existsSync(filePath)) continue
+      const text = readTailLines(filePath, 120, 128 * 1024).join('\n')
+      const matches = Array.from(text.matchAll(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/ig)).map(match => match[0])
+      if (matches.length) return matches[matches.length - 1]
+    } catch {
+      // Ignore optional local tunnel logs.
+    }
+  }
+  return null
+}
+
+async function fetchReachable(url, timeoutMs = EXTERNAL_TIMEOUT_MS) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{"events":[]}',
+      signal: controller.signal,
+    })
+    const pathLikelyExists = [200, 202, 204, 400, 401, 403, 405].includes(res.status)
+    return { reachable: pathLikelyExists, status: res.status }
+  } catch (e) {
+    return { reachable: false, error: sanitizeError(e) }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+async function lineWebhookStatus(config) {
+  const startedAt = Date.now()
+  const accounts = lineAccounts(config)
+  if (!accounts.length) {
+    return makeCheck('line.webhook', 'LINE webhook', 'info', 'info', 'No LINE OA account configured', startedAt)
+  }
+
+  const publicUrl = readCloudflaredPublicUrl()
+  if (!publicUrl) {
+    return makeCheck(
+      'line.webhook',
+      'LINE webhook',
+      'info',
+      'info',
+      `${accounts.length} LINE account(s) configured; no local cloudflared URL found to verify automatically`,
+      startedAt,
+      {
+        accounts,
+        remediation: 'If this server uses a quick tunnel, confirm the current HTTPS URL in LINE Developers Console',
+      }
+    )
+  }
+
+  const results = []
+  for (const account of accounts.slice(0, 8)) {
+    const pathPart = String(account.webhookPath || `/line/webhook/${account.id}`).startsWith('/')
+      ? String(account.webhookPath || `/line/webhook/${account.id}`)
+      : `/${account.webhookPath}`
+    const url = `${publicUrl}${pathPart}`
+    const result = await fetchReachable(url)
+    results.push({ accountId: account.id, webhookPath: pathPart, url, ...result })
+  }
+  const reachable = results.filter(result => result.reachable).length
+  const failed = results.length - reachable
+  return makeCheck(
+    'line.webhook',
+    'LINE webhook',
+    failed ? 'warn' : 'ok',
+    'warn',
+    failed
+      ? `${failed}/${results.length} LINE webhook path(s) not reachable through the current tunnel`
+      : `${reachable}/${results.length} LINE webhook path(s) reachable through the current tunnel`,
+    startedAt,
+    {
+      publicUrl,
+      warnings: results
+        .filter(result => !result.reachable)
+        .map(result => ({
+          id: `line.webhook.${result.accountId}`,
+          accountId: result.accountId,
+          status: 'unreachable',
+          summary: `${result.webhookPath}: HTTP ${result.status || '-'} ${result.error || 'not reachable or path not registered'}`,
+        })),
+      accepted: results
+        .filter(result => result.reachable)
+        .map(result => ({
+          accountId: result.accountId,
+          key: result.webhookPath,
+          acknowledgedAt: nowIso(),
+          note: `HTTP ${result.status}`,
+        })),
+      remediation: failed
+        ? 'Open LINE settings, verify webhookPath, and update LINE Developers Console to the current HTTPS tunnel URL'
+        : undefined,
+    }
+  )
+}
+
+function recentStalledMediaSessions() {
+  const logFile = latestGatewayLogFile()
+  if (!logFile) return []
+  try {
+    return readTailLines(logFile, 1200, 1024 * 1024)
+      .map(line => String(line))
+      .filter(line => /stalled session/i.test(line) && /(media|image|line)/i.test(line))
+      .slice(-10)
+      .map((line, index) => ({
+        id: `session.stalled.media.${index}`,
+        status: 'stalled',
+        summary: line.replace(/\s+/g, ' ').slice(0, 220),
+      }))
+  } catch {
+    return []
   }
 }
 
@@ -806,9 +984,45 @@ async function buildHealth() {
         legacyPatterns: soul.legacyPatterns,
         contractWarnings: soul.contractWarnings,
         workflowWarnings: soul.workflowWarnings,
+        nativeCapabilities: soul.nativeCapabilities,
+        nativeMediaStatus: soul.nativeMediaStatus,
         allowedToolsHash: soul.contract?.allowedToolsHash,
       }
     ))
+
+    const profileStart = Date.now()
+    let profileState = null
+    try {
+      profileState = await businessProfiles.getAgentBusinessProfileSafe(agent.id)
+    } catch (e) {
+      checks.push(makeCheck(
+        `business_profile.${agent.id}`,
+        `Business Profile ${agent.id}`,
+        'warn',
+        'warn',
+        `Business Profile status unavailable: ${sanitizeError(e)}`,
+        profileStart,
+        { remediation: 'Open Business Profiles and verify database connectivity before loading templates' }
+      ))
+    }
+    if (profileState?.profile) {
+      checks.push(makeCheck(
+        `business_profile.${agent.id}`,
+        `Business Profile ${agent.id}`,
+        profileState.isApplied ? 'ok' : 'warn',
+        'warn',
+        profileState.isApplied
+          ? `${profileState.profile.nameTh || profileState.profile.name} applied to SOUL`
+          : `${profileState.profile.nameTh || profileState.profile.name} is linked but SOUL has not loaded the latest profile block`,
+        profileStart,
+        {
+          profileId: profileState.profile.id,
+          profileHash: profileState.profile.soulBlockHash,
+          lastAppliedHash: profileState.link?.lastAppliedHash || null,
+          remediation: profileState.isApplied ? undefined : 'Open the Agent page, Load Template, Save SOUL, reset active sessions, then restart gateway',
+        }
+      ))
+    }
 
     const fallbackStart = Date.now()
     const fallbackIssues = (agentModelReadiness?.model?.fallbacks || [])
@@ -934,6 +1148,8 @@ async function buildHealth() {
     ))
   }
 
+  checks.push(await lineWebhookStatus(config))
+
   const telemetryStart = Date.now()
   try {
     const latency = buildLatencyFromGatewayLog({ minutes: 30, maxLines: 1500, maxBytes: 1024 * 1024 })
@@ -960,6 +1176,25 @@ async function buildHealth() {
       { remediation: 'Check /tmp/openclaw gateway logs and runtime telemetry markers' }
     ))
   }
+
+  const stalledMediaWarnings = recentStalledMediaSessions()
+  const stalledStart = Date.now()
+  checks.push(makeCheck(
+    'session.stalled.media',
+    'Media session recovery',
+    stalledMediaWarnings.length ? 'warn' : 'ok',
+    'warn',
+    stalledMediaWarnings.length
+      ? `${stalledMediaWarnings.length} recent stalled media/LINE session marker(s) found`
+      : 'No recent stalled media session markers found in gateway log',
+    stalledStart,
+    {
+      warnings: stalledMediaWarnings,
+      remediation: stalledMediaWarnings.length
+        ? 'Open Monitor, reset active sessions for the affected agent, then retest LINE image + follow-up text'
+        : undefined,
+    }
+  ))
 
   return finishHealth(checks, agents)
 }
@@ -1120,6 +1355,11 @@ module.exports._internal = {
   isSecretKey,
   compareVersions,
   parseOpenclawVersion,
+  lineAccounts,
+  lineWebhookStatus,
+  nativeCapabilitiesForAgent,
+  recentStalledMediaSessions,
+  soulStatus,
   telegramBindingIntentCandidates,
   telegramBindingIntentReport,
 }

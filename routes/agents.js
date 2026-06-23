@@ -8,6 +8,13 @@ const { generateSoulTemplate } = require('../lib/soul-template')
 const { getMcpTools } = require('../lib/mcp-tools')
 const businessProfiles = require('../lib/business-profiles')
 
+function nativeCapabilitiesForAgent(agent) {
+  const allow = Array.isArray(agent?.tools?.allow) ? agent.tools.allow : []
+  const out = []
+  if (allow.includes('image')) out.push('image')
+  return out
+}
+
 // ─── openclaw mcp helpers — ใช้ openclaw.json mcp.servers โดยตรง ───────────────
 function _readOcJson() {
   return readOpenclawConfig()
@@ -83,7 +90,10 @@ router.post('/', async (req, res) => {
       : workspace
     // ไม่สร้าง mcporter.json อีกต่อไป — ใช้ openclaw mcp ผ่าน UI แทน
     const toolResult = await getMcpTools({ accessMode, mcpUrl: null })
-    const soul = generateSoulTemplate(workspaceTilde, accessMode, null, 'professional', toolResult)
+    const soul = generateSoulTemplate(workspaceTilde, accessMode, null, 'professional', {
+      ...toolResult,
+      nativeCapabilities: nativeCapabilitiesForAgent(config.agents.list[config.agents.list.length - 1]),
+    })
     fs.writeFileSync(path.join(workspacePath, 'SOUL.md'), soul)
     writeOpenclawConfigAtomic(config, { reason: 'agent-create' })
     res.json({ ok: true })
@@ -123,7 +133,9 @@ router.get('/:id/soul/template', async (req, res) => {
     const soul = generateSoulTemplate(workspaceTilde, accessMode, mcpUrl, persona, {
       ...toolResult,
       businessProfileSoulBlock,
+      nativeCapabilities: nativeCapabilitiesForAgent(agent),
     })
+    const nativeCapabilities = nativeCapabilitiesForAgent(agent)
     const warnings = [...(toolResult.warnings || [])]
     if (businessProfileWarning) warnings.push(businessProfileWarning)
     if (accessMode === 'stock' && !/workflowContract=stock-flow-v1\b/.test(soul)) {
@@ -145,6 +157,8 @@ router.get('/:id/soul/template', async (req, res) => {
       businessProfile: businessProfileState?.profile || null,
       businessProfileHash: businessProfileState?.profile?.soulBlockHash || null,
       businessProfileApplied: businessProfileState?.isApplied || false,
+      nativeCapabilities,
+      nativeContractStatus: nativeCapabilities.includes('image') ? 'included' : 'not_required',
       generatedAt: toolResult.generatedAt,
       cache: toolResult.cache,
     })

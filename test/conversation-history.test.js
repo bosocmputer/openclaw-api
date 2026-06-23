@@ -313,6 +313,58 @@ test('conversation issue tagging detects multi-item search retry loops', () => {
   assert.ok(tags.includes('multi_item_slow'))
 })
 
+test('conversation issue tagging detects LINE media delivery uncertainty and media stalls', () => {
+  const issues = history._internal.deriveIssues({
+    id: 'turn-line-media',
+    agentId: 'stock',
+    channel: 'line',
+    userText: '[User sent media without caption]',
+    finalText: 'จากรูปน่าจะเป็นรถเก๋งครับ กรุณาระบุรุ่นรถเพิ่มครับ',
+    route: 'model_path',
+    intent: 'image',
+    status: 'ok',
+    durationMs: 3000,
+  }, [
+    {
+      type: 'user',
+      title: 'User message',
+      body: '[User sent media without caption]',
+      payload: { mediaCount: 1, media: [{ mimeType: 'image/jpeg', hasPreview: true }] },
+    },
+    {
+      type: 'warning',
+      title: 'stalled session',
+      body: 'stalled session channel=line reason=active_work_without_progress queueDepth=2',
+      payload: { reason: 'active_work_without_progress' },
+    },
+  ])
+
+  const tags = issues.map(issue => issue.tag)
+  assert.ok(tags.includes('line_delivery_uncertain'))
+  assert.ok(tags.includes('stalled_after_media'))
+})
+
+test('conversation issue tagging detects media without visible reply', () => {
+  const issues = history._internal.deriveIssues({
+    id: 'turn-media-no-reply',
+    agentId: 'stock',
+    channel: 'line',
+    userText: '[User sent media without caption]',
+    finalText: '',
+    route: 'model_path',
+    intent: 'image',
+    status: 'pending',
+    durationMs: 8000,
+  }, [{
+    type: 'user',
+    title: 'User message',
+    body: '[User sent media without caption]',
+    payload: { mediaCount: 1 },
+  }])
+
+  assert.ok(issues.map(issue => issue.tag).includes('media_no_visible_reply'))
+})
+
 test('conversation issue evidence is redacted', () => {
   const issues = history._internal.deriveIssues({
     id: 'turn-secret',

@@ -123,6 +123,24 @@ test('template contract allowed tools match tool source', () => {
   assert.deepEqual(contract.allowedTools, tools.map(t => t.name).sort())
 })
 
+test('template separates native image contract from MCP allowed tools', () => {
+  const tools = getFallbackTools('stock')
+  const soul = generateSoulTemplate(null, 'stock', null, 'professional', {
+    toolSource: 'live',
+    tools,
+    nativeCapabilities: ['image'],
+    generatedAt: '2026-06-15T00:00:00.000Z',
+  })
+  const contract = parseSoulContract(soul)
+
+  assert.match(soul, /## Native Tool Contract/)
+  assert.match(soul, /nativeCapabilities=image/)
+  assert.match(soul, /nativeMediaContract=native-media-v1/)
+  assert.match(soul, /native image ใช้เพื่ออ่านบริบทจากรูป/)
+  assert.match(soul, /ตรวจข้อมูลธุรกิจผ่าน MCP tools/)
+  assert.equal(contract.allowedTools.includes('image'), false)
+})
+
 test('template injects bounded business profile before MCP tool contract', () => {
   const businessProfileSoulBlock = buildBusinessProfileSoulBlock({
     id: '00000000-0000-4000-8000-000000000001',

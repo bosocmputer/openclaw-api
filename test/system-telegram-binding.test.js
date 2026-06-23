@@ -1,7 +1,12 @@
 const assert = require('node:assert/strict')
+const fs = require('node:fs')
+const os = require('node:os')
+const path = require('node:path')
 const test = require('node:test')
 
 const { _internal } = require('../routes/system')
+const { generateSoulTemplate } = require('../lib/soul-template')
+const { getFallbackTools } = require('../lib/mcp-tools')
 
 function configForBinding(agentId = 'admin') {
   return {
@@ -58,4 +63,59 @@ test('telegram binding intent report does not warn when task-specific bot routes
 
   assert.equal(report.warnings.length, 0)
   assert.equal(report.accepted.length, 0)
+})
+
+test('soul status warns when image-enabled agent is missing native media contract', () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'openclaw-soul-native-missing-'))
+  fs.writeFileSync(path.join(workspace, 'SOUL.md'), '## SOUL\nnative image is not contracted yet\n')
+
+  const status = _internal.soulStatus(
+    { id: 'stock', workspace, tools: { allow: ['image'] } },
+    getFallbackTools('stock')
+  )
+
+  assert.equal(status.nativeMediaStatus, 'missing')
+  assert.ok(status.workflowWarnings.includes('SOUL missing native image/media contract'))
+})
+
+test('soul status accepts generated template with native image contract', () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'openclaw-soul-native-ok-'))
+  const tools = getFallbackTools('stock')
+  fs.writeFileSync(path.join(workspace, 'SOUL.md'), generateSoulTemplate(workspace, 'stock', null, 'professional', {
+    tools,
+    toolSource: 'test',
+    nativeCapabilities: ['image'],
+    generatedAt: '2026-06-23T00:00:00.000Z',
+  }))
+
+  const status = _internal.soulStatus(
+    { id: 'stock', workspace, tools: { allow: ['image'] } },
+    tools
+  )
+
+  assert.equal(status.nativeMediaStatus, 'ok')
+  assert.equal(status.workflowWarnings.includes('SOUL missing native image/media contract'), false)
+})
+
+test('line account extraction supports named and default webhook paths', () => {
+  const accounts = _internal.lineAccounts({
+    channels: {
+      line: {
+        channelAccessToken: 'line-default-token',
+        webhookPath: '/line/webhook/main',
+        accounts: {
+          stock_oa: {
+            channelAccessToken: 'line-stock-token',
+            webhookPath: 'line/custom/stock',
+          },
+          disabled_oa: {},
+        },
+      },
+    },
+  })
+
+  assert.deepEqual(accounts, [
+    { id: 'stock_oa', webhookPath: 'line/custom/stock' },
+    { id: 'default', webhookPath: '/line/webhook/main' },
+  ])
 })

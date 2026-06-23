@@ -65,6 +65,17 @@ test('learning candidate rejects secret-like summaries', () => {
   }), /secret-like/)
 })
 
+test('learning candidate supports model runtime review target', () => {
+  const normalized = memoryLearning._internal.normalizeCandidateInput({
+    agentId: 'stock',
+    targetType: 'model_runtime',
+    summary: 'model latency should be reviewed without writing to memory',
+    evidence: [{ tag: 'slow_turn', reviewTarget: 'model/runtime' }],
+  })
+
+  assert.equal(normalized.targetType, 'model_runtime')
+})
+
 test('managed memory append does not overwrite user-authored sections', () => {
   const current = '# Long-Term Memory\n\n## User Notes\n- keep me\n'
   const next = memoryLearning._internal.buildManagedMemoryContent(current, {

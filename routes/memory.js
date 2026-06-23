@@ -3,6 +3,21 @@ const fs = require('fs')
 const path = require('path')
 const { HOME } = require('../lib/config')
 const { readOpenclawConfig } = require('../lib/openclaw-config')
+const { requirePg } = require('../lib/pg')
+const memoryLearning = require('../lib/memory-learning')
+
+function adminActor(req) {
+  return req.headers['x-openclaw-admin-user'] || null
+}
+
+function safeError(res, err) {
+  const status = Number(err.status || err.statusCode || 500)
+  if (status >= 500) {
+    console.error('[openclaw-api] memory', err.message)
+    return res.status(500).json({ error: 'Internal server error' })
+  }
+  return res.status(status).json({ error: err.message })
+}
 
 function readWorkspaceMemory(workspacePath) {
   const memoryDir = path.join(workspacePath, 'memory')
@@ -38,13 +53,44 @@ function readWorkspaceMemory(workspacePath) {
   return { files, totalChars, latestPreview, latestDate }
 }
 
+function getDreamingConfig(config) {
+  const pluginDreaming = config.plugins?.entries?.['memory-core']?.config?.dreaming
+  if (pluginDreaming && typeof pluginDreaming === 'object') {
+    return { enabled: pluginDreaming.enabled === true, config: pluginDreaming, source: 'plugins.entries.memory-core.config.dreaming' }
+  }
+  const legacyDreaming = config.memory?.dreaming
+  if (legacyDreaming && typeof legacyDreaming === 'object') {
+    return { enabled: legacyDreaming.enabled === true, config: legacyDreaming, source: 'memory.dreaming' }
+  }
+  return { enabled: false, config: null, source: 'default' }
+}
+
+function findDreamsFile(workspacePath) {
+  const names = ['DREAMS.md', 'dreams.md']
+  for (const name of names) {
+    const filePath = path.join(workspacePath, name)
+    if (fs.existsSync(filePath)) return { path: filePath, name }
+  }
+  return { path: path.join(workspacePath, 'DREAMS.md'), name: 'DREAMS.md' }
+}
+
+function memorySizeInfo(sizeChars, config) {
+  const bootstrapMaxChars = Number(config.agents?.defaults?.bootstrapMaxChars || 20000)
+  const estimatedTokens = Math.ceil(sizeChars / 4)
+  return {
+    estimatedTokens,
+    sizeWarning: memoryLearning.memorySizeWarning(sizeChars),
+    injectedLikely: sizeChars > 0 ? (sizeChars <= bootstrapMaxChars ? 'full' : 'truncated') : 'missing',
+    bootstrapMaxChars,
+  }
+}
+
 // GET /api/memory/status
 router.get('/status', (req, res) => {
   try {
     const config = readOpenclawConfig()
     const agents = config.agents?.list ?? []
-    const dreamingEnabled = config.memory?.dreaming?.enabled ?? false
-    const dreamingConfig = config.memory?.dreaming ?? null
+    const dreaming = getDreamingConfig(config)
 
     const result = agents.map(agent => {
       const workspacePath = agent.workspace.replace('~', HOME)
@@ -63,8 +109,9 @@ router.get('/status', (req, res) => {
           .join('\n')
       }
 
-      // dreams.md
-      const dreamsPath = path.join(workspacePath, 'dreams.md')
+      // DREAMS.md / dreams.md
+      const dreamsFile = findDreamsFile(workspacePath)
+      const dreamsPath = dreamsFile.path
       const dreamsExists = fs.existsSync(dreamsPath)
       let dreamsSizeChars = 0
       let dreamsPreview = ''
@@ -80,8 +127,8 @@ router.get('/status', (req, res) => {
       return {
         agentId: agent.id,
         workspace: agent.workspace,
-        memory: { exists: memoryExists, sizeChars: memorySizeChars, preview: memoryPreview },
-        dreams: { exists: dreamsExists, sizeChars: dreamsSizeChars, preview: dreamsPreview },
+        memory: { exists: memoryExists, sizeChars: memorySizeChars, preview: memoryPreview, ...memorySizeInfo(memorySizeChars, config) },
+        dreams: { exists: dreamsExists, sizeChars: dreamsSizeChars, preview: dreamsPreview, path: dreamsExists ? dreamsPath : null, canonicalName: dreamsFile.name },
         dailyMemory: {
           fileCount: daily.files.length,
           totalChars: daily.totalChars,
@@ -89,13 +136,61 @@ router.get('/status', (req, res) => {
           latestPreview: daily.latestPreview,
           files: daily.files,
         },
-        dreaming: { enabled: dreamingEnabled, config: dreamingConfig },
+        dreaming,
       }
     })
     res.json(result)
   } catch (e) {
     console.error('[openclaw-api]', req.method, req.path, e.message)
     res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// GET /api/memory/learning-candidates
+router.get('/learning-candidates', requirePg, async (req, res) => {
+  try {
+    res.json(await memoryLearning.listCandidates({
+      agentId: req.query.agentId,
+      status: req.query.status,
+      targetType: req.query.targetType,
+      limit: req.query.limit,
+    }))
+  } catch (err) {
+    safeError(res, err)
+  }
+})
+
+// POST /api/memory/learning-candidates
+router.post('/learning-candidates', requirePg, async (req, res) => {
+  try {
+    const candidate = await memoryLearning.createCandidate(req.body, adminActor(req))
+    res.status(candidate.deduped ? 200 : 201).json(candidate)
+  } catch (err) {
+    safeError(res, err)
+  }
+})
+
+router.post('/learning-candidates/:id/approve', requirePg, async (req, res) => {
+  try {
+    res.json(await memoryLearning.setCandidateStatus(req.params.id, 'approved', adminActor(req)))
+  } catch (err) {
+    safeError(res, err)
+  }
+})
+
+router.post('/learning-candidates/:id/reject', requirePg, async (req, res) => {
+  try {
+    res.json(await memoryLearning.setCandidateStatus(req.params.id, 'rejected', adminActor(req)))
+  } catch (err) {
+    safeError(res, err)
+  }
+})
+
+router.post('/learning-candidates/:id/apply', requirePg, async (req, res) => {
+  try {
+    res.json(await memoryLearning.applyCandidate(req.params.id, { force: req.body?.force === true }, adminActor(req)))
+  } catch (err) {
+    safeError(res, err)
   }
 })
 
@@ -119,11 +214,29 @@ router.get('/:agentId/dreams', (req, res) => {
     const config = readOpenclawConfig()
     const agent = config.agents?.list?.find(a => a.id === req.params.agentId)
     if (!agent) return res.status(404).json({ error: 'Agent not found' })
-    const dreamsPath = path.join(agent.workspace.replace('~', HOME), 'dreams.md')
+    const dreamsPath = findDreamsFile(agent.workspace.replace('~', HOME)).path
     res.json({ content: fs.existsSync(dreamsPath) ? fs.readFileSync(dreamsPath, 'utf8') : '' })
   } catch (e) {
     console.error('[openclaw-api]', req.method, req.path, e.message)
     res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// GET /api/memory/:agentId/backups
+router.get('/:agentId/backups', (req, res) => {
+  try {
+    res.json({ backups: memoryLearning.listBackups(req.params.agentId) })
+  } catch (err) {
+    safeError(res, err)
+  }
+})
+
+// POST /api/memory/:agentId/rollback
+router.post('/:agentId/rollback', async (req, res) => {
+  try {
+    res.json(await memoryLearning.rollbackMemory(req.params.agentId, req.body?.backupId, adminActor(req)))
+  } catch (err) {
+    safeError(res, err)
   }
 })
 
@@ -146,3 +259,8 @@ router.get('/:agentId/daily/:filename', (req, res) => {
 })
 
 module.exports = router
+module.exports._internal = {
+  getDreamingConfig,
+  findDreamsFile,
+  memorySizeInfo,
+}

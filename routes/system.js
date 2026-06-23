@@ -21,6 +21,7 @@ const HEALTH_TTL_MS = 30_000
 const EXTERNAL_TIMEOUT_MS = 1800
 const TARGET_OPENCLAW_VERSION = '2026.6.8'
 const MIN_NODE_VERSION = '22.19.0'
+const TELEGRAM_BINDING_ACKS_PATH = path.join(HOME, '.openclaw/admin-state/telegram-binding-intent-acks.json')
 let healthCache = null
 
 function nowIso() {
@@ -525,8 +526,28 @@ function telegramAccounts(config) {
   return accounts
 }
 
-function telegramBindingIntentWarnings(config) {
-  const warnings = []
+function telegramBindingAckKey(accountId, agentId) {
+  return `${accountId}::${agentId}`
+}
+
+function readTelegramBindingIntentAcks() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(TELEGRAM_BINDING_ACKS_PATH, 'utf8'))
+    return parsed && typeof parsed === 'object' ? parsed : { acknowledgements: {} }
+  } catch {
+    return { acknowledgements: {} }
+  }
+}
+
+function writeTelegramBindingIntentAcks(state) {
+  fs.mkdirSync(path.dirname(TELEGRAM_BINDING_ACKS_PATH), { recursive: true })
+  const tmp = `${TELEGRAM_BINDING_ACKS_PATH}.${process.pid}.${Date.now()}.tmp`
+  fs.writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`)
+  fs.renameSync(tmp, TELEGRAM_BINDING_ACKS_PATH)
+}
+
+function telegramBindingIntentCandidates(config) {
+  const candidates = []
   const accountIds = new Set(Object.keys(config.channels?.telegram?.accounts || {}))
   if (config.channels?.telegram?.botToken) accountIds.add('default')
   const routeBindings = (config.bindings || []).filter(
@@ -539,10 +560,25 @@ function telegramBindingIntentWarnings(config) {
     const taskSpecificAccount = /(stock|inventory|price|sale|sales|order|คลัง|สต็อก|ราคา|ขาย)/i.test(accountId)
     const broadAgent = /^(admin|general)$/i.test(agentId)
     if (taskSpecificAccount && broadAgent) {
-      warnings.push({ accountId, agentId })
+      candidates.push({ accountId, agentId, key: telegramBindingAckKey(accountId, agentId) })
     }
   }
-  return warnings
+  return candidates
+}
+
+function telegramBindingIntentReport(config, ackState = readTelegramBindingIntentAcks()) {
+  const acknowledgements = ackState?.acknowledgements || {}
+  const warnings = []
+  const accepted = []
+  for (const candidate of telegramBindingIntentCandidates(config)) {
+    const ack = acknowledgements[candidate.key]
+    if (ack?.accountId === candidate.accountId && ack?.agentId === candidate.agentId) {
+      accepted.push({ ...candidate, acknowledgedAt: ack.acknowledgedAt, note: ack.note || '' })
+    } else {
+      warnings.push(candidate)
+    }
+  }
+  return { warnings, accepted }
 }
 
 function recentToolLoopWarnings(config) {
@@ -850,7 +886,9 @@ async function buildHealth() {
 
   const tgAccounts = telegramAccounts(config)
   const bindingStart = Date.now()
-  const bindingWarnings = telegramBindingIntentWarnings(config)
+  const bindingReport = telegramBindingIntentReport(config)
+  const bindingWarnings = bindingReport.warnings
+  const acceptedBindings = bindingReport.accepted
   checks.push(makeCheck(
     'telegram.binding.intent',
     'Telegram binding intent',
@@ -858,10 +896,13 @@ async function buildHealth() {
     'warn',
     bindingWarnings.length
       ? `${bindingWarnings.length} task-specific Telegram bot(s) are routed to broad agents`
-      : 'Telegram route bindings match their apparent account intent',
+      : acceptedBindings.length
+        ? `${acceptedBindings.length} broad Telegram route(s) acknowledged as intentional`
+        : 'Telegram route bindings match their apparent account intent',
     bindingStart,
     {
       warnings: bindingWarnings,
+      accepted: acceptedBindings,
       remediation: bindingWarnings.length
         ? 'Open Telegram settings and confirm whether these bots should route to stock/sale-specific agents instead of admin/general'
         : undefined,
@@ -964,6 +1005,49 @@ router.get('/health', async (req, res) => {
   }
 })
 
+router.post('/telegram-binding-intent/ack', async (req, res) => {
+  try {
+    const accountId = String(req.body?.accountId || '').trim()
+    const agentId = String(req.body?.agentId || '').trim()
+    const note = String(req.body?.note || '').trim().slice(0, 240)
+    if (!accountId || !agentId) {
+      return res.status(400).json({ ok: false, error: 'accountId and agentId are required' })
+    }
+    if (accountId.length > 160 || agentId.length > 120) {
+      return res.status(400).json({ ok: false, error: 'accountId or agentId is too long' })
+    }
+
+    const config = readOpenclawConfig()
+    const candidates = telegramBindingIntentCandidates(config)
+    const match = candidates.find(candidate => candidate.accountId === accountId && candidate.agentId === agentId)
+    if (!match) {
+      return res.status(404).json({
+        ok: false,
+        error: 'No current task-specific Telegram route to broad agent matches this acknowledgement',
+      })
+    }
+
+    const state = readTelegramBindingIntentAcks()
+    const acknowledgements = state.acknowledgements || {}
+    const acknowledgement = {
+      accountId,
+      agentId,
+      note,
+      acknowledgedAt: nowIso(),
+    }
+    acknowledgements[match.key] = acknowledgement
+    writeTelegramBindingIntentAcks({
+      version: 1,
+      updatedAt: acknowledgement.acknowledgedAt,
+      acknowledgements,
+    })
+    healthCache = null
+    res.json({ ok: true, acknowledgement })
+  } catch (e) {
+    res.status(500).json({ ok: false, error: sanitizeError(e) })
+  }
+})
+
 router.get('/support-bundle', async (req, res) => {
   const startedAt = Date.now()
   try {
@@ -1036,4 +1120,6 @@ module.exports._internal = {
   isSecretKey,
   compareVersions,
   parseOpenclawVersion,
+  telegramBindingIntentCandidates,
+  telegramBindingIntentReport,
 }

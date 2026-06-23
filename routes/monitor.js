@@ -261,11 +261,48 @@ function looksLikeLocalMediaPath(value) {
   return false
 }
 
+function resolveMediaRefToPath(value) {
+  const raw = String(value || '').trim()
+  if (!/^media:\/\//i.test(raw)) return null
+  let scope = ''
+  let name = ''
+  try {
+    const parsed = new URL(raw)
+    scope = parsed.host
+    name = decodeURIComponent(String(parsed.pathname || '').replace(/^\/+/, ''))
+  } catch {
+    const match = raw.match(/^media:\/\/([^/]+)\/(.+)$/i)
+    scope = match?.[1] || ''
+    name = match?.[2] || ''
+  }
+  if (scope !== 'inbound') return null
+  if (!name || name !== path.basename(name) || !/\.(png|jpe?g|webp|gif)$/i.test(name)) return null
+  return path.join(HOME, '.openclaw', 'media', 'inbound', name)
+}
+
+function safeMediaRefFromPath(value) {
+  const raw = String(value || '')
+  if (!looksLikeLocalMediaPath(raw)) return null
+  const expanded = expandHomePath(raw)
+  if (!path.isAbsolute(expanded)) return null
+  const normalized = path.normalize(expanded)
+  const inboundRoot = path.join(HOME, '.openclaw', 'media', 'inbound')
+  if (normalized !== inboundRoot && !normalized.startsWith(inboundRoot + path.sep)) return null
+  const name = path.basename(normalized)
+  if (!name || !/\.(png|jpe?g|webp|gif)$/i.test(name)) return null
+  return `media://inbound/${encodeURIComponent(name)}`
+}
+
+function arrayValue(value) {
+  if (Array.isArray(value)) return value
+  return value === undefined || value === null ? [] : [value]
+}
+
 function extractMediaCandidates(value, depth = 0, seen = new Set()) {
   if (!value || depth > 6) return []
   if (typeof value === 'string') {
     if (looksLikeLocalMediaPath(value)) return [{ path: value }]
-    if (/^media:\/\//i.test(value)) return [{ ref: value }]
+    if (/^media:\/\//i.test(value)) return [{ ref: value, path: resolveMediaRefToPath(value) }]
     return []
   }
   if (typeof value !== 'object') return []
@@ -278,19 +315,39 @@ function extractMediaCandidates(value, depth = 0, seen = new Set()) {
     return candidates
   }
 
-  const type = String(value.type || value.kind || value.mediaType || value.mimeType || value.mime_type || '').toLowerCase()
-  const mimeType = normalizeMimeType(value.mimeType || value.mime_type || value.contentType || value.content_type)
-  const pathValue = value.path || value.filePath || value.file_path || value.localPath || value.local_path || value.source || value.url || value.uri || value.href
+  const mediaPaths = arrayValue(value.MediaPaths ?? value.mediaPaths ?? value.media_paths)
+  const mediaTypes = arrayValue(value.MediaTypes ?? value.mediaTypes ?? value.media_types)
+  for (const [index, mediaPath] of mediaPaths.entries()) {
+    if (looksLikeLocalMediaPath(mediaPath)) {
+      candidates.push({
+        path: mediaPath,
+        ref: safeMediaRefFromPath(mediaPath),
+        mimeType: normalizeMimeType(mediaTypes[index] || mediaTypes[0]),
+      })
+    } else if (/^media:\/\//i.test(String(mediaPath || ''))) {
+      candidates.push({
+        path: resolveMediaRefToPath(mediaPath),
+        ref: mediaPath,
+        mimeType: normalizeMimeType(mediaTypes[index] || mediaTypes[0]),
+      })
+    }
+  }
+
+  const type = String(value.type || value.kind || value.mediaType || value.MediaType || value.mimeType || value.mime_type || '').toLowerCase()
+  const mimeType = normalizeMimeType(value.mimeType || value.mime_type || value.contentType || value.content_type || value.MediaType || value.mediaType)
+  const pathValue = value.path || value.filePath || value.file_path || value.localPath || value.local_path || value.mediaPath || value.media_path || value.MediaPath || value.source || value.url || value.uri || value.href
   const refValue = value.ref || value.mediaRef || value.media_ref || value.id
   const fileName = value.fileName || value.file_name || value.filename || value.name
   const sizeBytes = firstFiniteNumber(value.sizeBytes, value.size_bytes, value.fileSize, value.file_size, value.bytes)
   const caption = value.caption || value.text || value.alt
-  const objectLooksLikeMedia = /image|photo|media|attachment|file/.test(type) || String(mimeType).startsWith('image/') || looksLikeLocalMediaPath(pathValue) || /^media:\/\//i.test(String(pathValue || refValue || ''))
+  const refPath = resolveMediaRefToPath(pathValue) || resolveMediaRefToPath(refValue)
+  const mediaRef = /^media:\/\//i.test(String(pathValue || '')) ? pathValue : /^media:\/\//i.test(String(refValue || '')) ? refValue : safeMediaRefFromPath(pathValue)
+  const objectLooksLikeMedia = /image|photo|media|attachment|file/.test(type) || String(mimeType).startsWith('image/') || looksLikeLocalMediaPath(pathValue) || Boolean(refPath) || /^media:\/\//i.test(String(pathValue || refValue || ''))
 
   if (objectLooksLikeMedia) {
     candidates.push({
-      path: looksLikeLocalMediaPath(pathValue) ? pathValue : null,
-      ref: /^media:\/\//i.test(String(pathValue || '')) ? pathValue : /^media:\/\//i.test(String(refValue || '')) ? refValue : null,
+      path: looksLikeLocalMediaPath(pathValue) ? pathValue : refPath,
+      ref: mediaRef,
       mimeType,
       fileName,
       sizeBytes,
@@ -301,7 +358,7 @@ function extractMediaCandidates(value, depth = 0, seen = new Set()) {
 
   for (const [key, child] of Object.entries(value)) {
     if (/token|authorization|api[_-]?key|secret|password|botToken|file_id|fileId/i.test(key)) continue
-    if (objectLooksLikeMedia && /^(ref|mediaRef|media_ref|id|path|filePath|file_path|localPath|local_path|source|url|uri|href|fileName|file_name|filename|name|mimeType|mime_type|contentType|content_type|caption|text|alt)$/i.test(key)) continue
+    if (objectLooksLikeMedia && /^(ref|mediaRef|media_ref|id|path|filePath|file_path|localPath|local_path|mediaPath|media_path|MediaPath|MediaPaths|MediaType|MediaTypes|source|url|uri|href|fileName|file_name|filename|name|mimeType|mime_type|contentType|content_type|caption|text|alt)$/i.test(key)) continue
     if (/attachments|attachment|media|images|image|files|file|content|parts|items|data/i.test(key)) {
       candidates.push(...extractMediaCandidates(child, depth + 1, seen))
     }
@@ -309,8 +366,8 @@ function extractMediaCandidates(value, depth = 0, seen = new Set()) {
   return candidates
 }
 
-function normalizeMediaFromMessage(msg) {
-  const candidates = extractMediaCandidates(msg?.content)
+function normalizeMediaFromMessage(msg, options = {}) {
+  const candidates = extractMediaCandidates(msg)
   const byKey = new Map()
   for (const candidate of candidates) {
     const mimeType = inferMimeType(candidate.path, candidate.mimeType)
@@ -330,6 +387,8 @@ function normalizeMediaFromMessage(msg) {
       hasPreview: Boolean(id),
       previewUrl: id ? `/api/monitor/media/${id}` : undefined,
     }
+    const mediaRef = candidate.ref || safeMediaRefFromPath(candidate.path)
+    if (options.includeMediaRef && mediaRef) item.mediaRef = String(mediaRef)
     const key = item.id || `${item.mimeType}:${item.fileName || ''}:${item.caption || ''}:${candidate.ref || ''}`
     if (!byKey.has(key)) byKey.set(key, item)
   }
@@ -801,7 +860,7 @@ function buildConversationTurnsFromSession(params) {
 
     if (msg.role === 'user') {
       pushCurrent()
-      const media = normalizeMediaFromMessage(msg)
+      const media = normalizeMediaFromMessage(msg, { includeMediaRef: true })
       current = {
         id: `${sessionKey}:${ts || turns.length}`,
         source: 'session',
@@ -893,6 +952,14 @@ function normalizeSessionEntry(entry) {
       role: entry.message.role,
       content: entry.message.content,
       timestamp: entry.timestamp,
+      MediaPath: entry.message.MediaPath ?? entry.MediaPath,
+      MediaPaths: entry.message.MediaPaths ?? entry.MediaPaths,
+      MediaType: entry.message.MediaType ?? entry.MediaType,
+      MediaTypes: entry.message.MediaTypes ?? entry.MediaTypes,
+      mediaPath: entry.message.mediaPath ?? entry.mediaPath,
+      mediaPaths: entry.message.mediaPaths ?? entry.mediaPaths,
+      mediaType: entry.message.mediaType ?? entry.mediaType,
+      mediaTypes: entry.message.mediaTypes ?? entry.mediaTypes,
       usage: entry.message.usage ?? entry.usage,
       api: entry.message.api,
       provider: entry.message.provider,
@@ -1966,6 +2033,7 @@ module.exports = {
     normalizeSessionEntry,
     normalizeMediaFromMessage,
     registerPreviewMedia,
+    resolveMediaRefToPath,
     resolvePreviewPath,
     shouldIncludeMonitorMessage,
     extractToolResultText,

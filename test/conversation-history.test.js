@@ -1,5 +1,9 @@
 const assert = require('node:assert/strict')
 const test = require('node:test')
+const fs = require('node:fs')
+const path = require('node:path')
+
+process.env.MONITOR_MEDIA_PREVIEW_ENABLED = '1'
 
 const history = require('../lib/conversation-history')
 
@@ -119,6 +123,50 @@ test('conversation media preview ids do not change stable event hashes', () => {
 
   assert.equal(withPreview.events.find(event => event.type === 'user').payload.media[0].id, 'b'.repeat(48))
   assert.equal(withoutPreview.events.find(event => event.type === 'user').hash, withPreview.events.find(event => event.type === 'user').hash)
+})
+
+test('conversation media refs re-register previews without exposing local paths', () => {
+  const inboundDir = path.join(process.env.HOME, '.openclaw', 'media', 'inbound')
+  fs.mkdirSync(inboundDir, { recursive: true })
+  const fileName = `openclaw-history-${Date.now()}-${Math.random().toString(16).slice(2)}.jpg`
+  const filePath = path.join(inboundDir, fileName)
+  const mediaRef = `media://inbound/${encodeURIComponent(fileName)}`
+  fs.writeFileSync(filePath, Buffer.from([0xff, 0xd8, 0xff, 0xd9]))
+
+  try {
+    const publicMedia = history._internal.normalizeConversationMedia({
+      mediaRef,
+      kind: 'image',
+      mimeType: 'image/jpeg',
+      fileName,
+      hasPreview: false,
+    })
+    const stored = history._internal.normalizeTurn({
+      id: 'turn-media-ref',
+      source: 'session',
+      startedAt: '2026-06-19T01:00:00.000Z',
+      agentId: 'stock',
+      channel: 'telegram',
+      user: '7548005041',
+      userText: '[User sent media without caption]',
+      finalText: 'อ่านรูปได้ครับ',
+      route: 'model_path',
+      intent: 'unknown',
+      status: 'ok',
+      media: [{ mediaRef, kind: 'image', mimeType: 'image/jpeg', fileName }],
+    })
+    const userPayload = stored.events.find(event => event.type === 'user').payload
+
+    assert.equal(publicMedia.hasPreview, true)
+    assert.match(publicMedia.id, /^[a-f0-9]{48}$/)
+    assert.equal(publicMedia.previewUrl, `/api/monitor/media/${publicMedia.id}`)
+    assert.equal(publicMedia.mediaRef, undefined)
+    assert.equal(userPayload.media[0].mediaRef, mediaRef)
+    assert.doesNotMatch(JSON.stringify(publicMedia), /\\.openclaw|MediaPath/)
+    assert.doesNotMatch(JSON.stringify(userPayload), /\\.openclaw/)
+  } finally {
+    fs.rmSync(filePath, { force: true })
+  }
 })
 
 test('conversation query filters default to bounded 24 hour window and clamp limit', () => {

@@ -4,6 +4,8 @@ const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
 
+process.env.MONITOR_MEDIA_PREVIEW_ENABLED = '1'
+
 const { _internal } = require('../routes/monitor')
 
 test('delivery mirror assistant messages are hidden from monitor views', () => {
@@ -313,6 +315,43 @@ test('monitor extracts media metadata without exposing preview paths by default'
   assert.equal(media[0].sizeBytes, 12345)
   assert.equal(media[0].hasPreview, false)
   assert.equal(media[0].previewUrl, undefined)
+})
+
+test('monitor extracts runtime MediaPath fields and returns only safe preview ids', () => {
+  const inboundDir = path.join(process.env.HOME, '.openclaw', 'media', 'inbound')
+  fs.mkdirSync(inboundDir, { recursive: true })
+  const fileName = `openclaw-test-${Date.now()}-${Math.random().toString(16).slice(2)}.jpg`
+  const filePath = path.join(inboundDir, fileName)
+  fs.writeFileSync(filePath, Buffer.from([0xff, 0xd8, 0xff, 0xd9]))
+
+  try {
+    const msg = _internal.normalizeSessionEntry({
+      timestamp: '2026-06-23T04:50:40.898Z',
+      message: {
+        role: 'user',
+        content: 'มีโช็คของรถรุ่นนี้ไหม',
+        MediaPath: filePath,
+        MediaPaths: [filePath],
+        MediaType: 'image/jpeg',
+        MediaTypes: ['image/jpeg'],
+      },
+    })
+    const media = _internal.normalizeMediaFromMessage(msg)
+    const storageMedia = _internal.normalizeMediaFromMessage(msg, { includeMediaRef: true })
+
+    assert.equal(media.length, 1)
+    assert.equal(media[0].kind, 'image')
+    assert.equal(media[0].mimeType, 'image/jpeg')
+    assert.equal(media[0].fileName, fileName)
+    assert.equal(media[0].hasPreview, true)
+    assert.match(media[0].id, /^[a-f0-9]{48}$/)
+    assert.equal(media[0].previewUrl, `/api/monitor/media/${media[0].id}`)
+    assert.equal(media[0].mediaRef, undefined)
+    assert.doesNotMatch(JSON.stringify(media[0]), /\\.openclaw|MediaPath/)
+    assert.equal(storageMedia[0].mediaRef, `media://inbound/${encodeURIComponent(fileName)}`)
+  } finally {
+    fs.rmSync(filePath, { force: true })
+  }
 })
 
 test('media-only user messages become conversation turns with a safe placeholder', () => {

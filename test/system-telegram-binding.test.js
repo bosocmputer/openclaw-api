@@ -119,3 +119,20 @@ test('line account extraction supports named and default webhook paths', () => {
     { id: 'default', webhookPath: '/line/webhook/main' },
   ])
 })
+
+test('recent stalled media sessions ignore markers before latest gateway ready', () => {
+  const logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'openclaw-stalled-media-'))
+  const logPath = path.join(logDir, 'openclaw-test.log')
+  fs.writeFileSync(logPath, [
+    '{"message":"stalled session: sessionKey=agent:stock:line:direct:u1 reason=active_work_without_progress"}',
+    '{"message":"gateway ready"}',
+    '{"message":"ordinary line event"}',
+  ].join('\n'))
+
+  assert.deepEqual(_internal.recentStalledMediaSessions(logDir), [])
+
+  fs.appendFileSync(logPath, '\n{"message":"stalled session: sessionKey=agent:stock:line:direct:u2 reason=active_work_without_progress"}\n')
+  const warnings = _internal.recentStalledMediaSessions(logDir)
+  assert.equal(warnings.length, 1)
+  assert.match(warnings[0].summary, /u2/)
+})

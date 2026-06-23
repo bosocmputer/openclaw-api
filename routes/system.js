@@ -674,11 +674,16 @@ async function lineWebhookStatus(config) {
   )
 }
 
-function recentStalledMediaSessions() {
-  const logFile = latestGatewayLogFile()
+function recentStalledMediaSessions(logDir = '/tmp/openclaw') {
+  const logFile = latestGatewayLogFile(logDir)
   if (!logFile) return []
   try {
-    return readTailLines(logFile, 1200, 1024 * 1024)
+    const lines = readTailLines(logFile, 1200, 1024 * 1024).map(line => String(line))
+    const lastGatewayReadyIndex = lines.reduce((lastIndex, line, index) => (
+      /gateway ready/i.test(line) ? index : lastIndex
+    ), -1)
+    const scanLines = lastGatewayReadyIndex >= 0 ? lines.slice(lastGatewayReadyIndex + 1) : lines
+    return scanLines
       .map(line => String(line))
       .filter(line => /stalled session/i.test(line) && /(media|image|line)/i.test(line))
       .slice(-10)

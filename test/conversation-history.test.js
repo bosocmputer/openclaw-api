@@ -87,6 +87,40 @@ test('conversation history stores only safe media preview references', () => {
   assert.doesNotMatch(JSON.stringify(userEvent.payload), /openclaw|private|telegram-secret/)
 })
 
+test('conversation media preview ids do not change stable event hashes', () => {
+  const baseTurn = {
+    id: 'turn-media-hash',
+    source: 'session',
+    startedAt: '2026-06-19T01:00:00.000Z',
+    agentId: 'stock',
+    channel: 'telegram',
+    user: '7548005041',
+    userText: '[User sent media without caption]',
+    finalText: 'อ่านรูปได้ครับ',
+    route: 'model_path',
+    intent: 'unknown',
+    status: 'ok',
+  }
+  const withoutPreview = history._internal.normalizeTurn({
+    ...baseTurn,
+    media: [{ kind: 'image', mimeType: 'image/jpeg', fileName: 'photo.jpg', hasPreview: true }],
+  })
+  const withPreview = history._internal.normalizeTurn({
+    ...baseTurn,
+    media: [{
+      id: 'b'.repeat(48),
+      kind: 'image',
+      mimeType: 'image/jpeg',
+      fileName: 'photo.jpg',
+      hasPreview: true,
+      previewUrl: `/api/monitor/media/${'b'.repeat(48)}`,
+    }],
+  })
+
+  assert.equal(withPreview.events.find(event => event.type === 'user').payload.media[0].id, 'b'.repeat(48))
+  assert.equal(withoutPreview.events.find(event => event.type === 'user').hash, withPreview.events.find(event => event.type === 'user').hash)
+})
+
 test('conversation query filters default to bounded 24 hour window and clamp limit', () => {
   const filters = history._internal.parseQueryFilters({ limit: '9999' })
   assert.equal(filters.limit, 500)

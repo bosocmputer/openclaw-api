@@ -52,6 +52,41 @@ test('conversation turn normalization creates bounded event timeline', () => {
   assert.doesNotMatch(JSON.stringify(normalized.events), /Bearer leaked/)
 })
 
+test('conversation history stores only safe media preview references', () => {
+  const normalized = history._internal.normalizeTurn({
+    id: 'turn-media',
+    source: 'session',
+    startedAt: '2026-06-19T01:00:00.000Z',
+    agentId: 'stock',
+    channel: 'telegram',
+    user: '7548005041',
+    userText: '[User sent media without caption]',
+    finalText: 'อ่านรูปได้ครับ',
+    route: 'model_path',
+    intent: 'unknown',
+    status: 'ok',
+    media: [{
+      id: 'a'.repeat(48),
+      kind: 'image',
+      mimeType: 'image/jpeg',
+      fileName: '../../photo.jpg',
+      sizeBytes: 12345,
+      caption: 'สินค้า',
+      hasPreview: true,
+      previewUrl: `/api/monitor/media/${'a'.repeat(48)}`,
+      path: '/root/.openclaw/private/photo.jpg',
+      botToken: 'telegram-secret',
+    }],
+  })
+
+  const userEvent = normalized.events.find(event => event.type === 'user')
+  assert.equal(userEvent.payload.mediaCount, 1)
+  assert.equal(userEvent.payload.media[0].id, 'a'.repeat(48))
+  assert.equal(userEvent.payload.media[0].previewUrl, `/api/monitor/media/${'a'.repeat(48)}`)
+  assert.equal(userEvent.payload.media[0].fileName, 'photo.jpg')
+  assert.doesNotMatch(JSON.stringify(userEvent.payload), /openclaw|private|telegram-secret/)
+})
+
 test('conversation query filters default to bounded 24 hour window and clamp limit', () => {
   const filters = history._internal.parseQueryFilters({ limit: '9999' })
   assert.equal(filters.limit, 500)

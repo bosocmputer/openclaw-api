@@ -61,6 +61,19 @@ test('tool not found loops are summarized without full session logs', () => {
   assert.equal(warnings[0].count, 5)
 })
 
+test('tool names expose namespace separately from MCP tool name', () => {
+  assert.deepEqual(_internal.splitToolName('admin__search_product'), {
+    toolNamespace: 'admin',
+    toolBaseName: 'search_product',
+    toolDisplayName: 'search_product',
+  })
+  assert.deepEqual(_internal.splitToolName('search_product'), {
+    toolNamespace: null,
+    toolBaseName: 'search_product',
+    toolDisplayName: 'search_product',
+  })
+})
+
 test('reply quality warnings detect placeholders, English follow-up menus, and duplicates', () => {
   const warnings = _internal.detectReplyQualityWarnings(`{{1}}
 ผมไม่พบข้อมูลสินค้า "โช๊ค jazz (BF0009)" ในทุกคลังสินค้าครับ
@@ -145,6 +158,17 @@ test('conversation turn is recovered when fallback succeeds after a model timeou
   assert.equal(turns[0].rootCause, 'model_timeout_recovered')
   assert.equal(turns[0].finalText, 'ไม่พบยอดคงเหลือสินค้า TEST-001 ในคลังครับ')
   assert.deepEqual(turns[0].toolPath.map(tool => tool.name), ['stock__search_product', 'stock__get_stock_balance'])
+  assert.deepEqual(
+    turns[0].toolPath.map(tool => ({
+      name: tool.name,
+      toolNamespace: tool.toolNamespace,
+      toolDisplayName: tool.toolDisplayName,
+    })),
+    [
+      { name: 'stock__search_product', toolNamespace: 'stock', toolDisplayName: 'search_product' },
+      { name: 'stock__get_stock_balance', toolNamespace: 'stock', toolDisplayName: 'get_stock_balance' },
+    ]
+  )
   assert.ok(turns[0].warnings.some(w => w.type === 'model_timeout'))
   assert.ok(turns[0].warnings.some(w => w.type === 'model_fallback_recovered'))
 })

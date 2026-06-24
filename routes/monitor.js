@@ -123,6 +123,39 @@ function decodeMonitorToolText(value) {
   }
 }
 
+function splitToolName(toolName) {
+  const raw = String(toolName || '').trim()
+  if (!raw) {
+    return {
+      toolNamespace: null,
+      toolBaseName: '',
+      toolDisplayName: '',
+    }
+  }
+  const separatorIndex = raw.indexOf('__')
+  if (separatorIndex <= 0 || separatorIndex >= raw.length - 2) {
+    return {
+      toolNamespace: null,
+      toolBaseName: raw,
+      toolDisplayName: raw,
+    }
+  }
+  const namespace = raw.slice(0, separatorIndex)
+  const baseName = raw.slice(separatorIndex + 2)
+  return {
+    toolNamespace: namespace,
+    toolBaseName: baseName,
+    toolDisplayName: baseName,
+  }
+}
+
+function toolEventFields(toolName) {
+  return {
+    toolName,
+    ...splitToolName(toolName),
+  }
+}
+
 function parseTelegramNativeTarget(target) {
   const parts = String(target || '').split(':')
   const agentIdx = parts.findIndex(part => part === 'agent')
@@ -645,6 +678,7 @@ function buildConversationTurnsFromGatewayLog({ minutes, agent, channel, limit, 
         if (detailIndex >= 0) usedToolDetails.add(detailIndex)
         return {
           name,
+          ...splitToolName(name),
           status: detail?.status || 'ok',
           durationMs: detail?.durationMs ?? (name.includes('search') ? Number(kv.searchMs || 0) || null : name.includes('balance') ? Number(kv.balanceMs || 0) || null : null),
           toolInput: detail?.toolInput || undefined,
@@ -743,7 +777,7 @@ function buildGatewayMonitorSessions({ seenModelTexts } = {}) {
         ts: endTs,
         type: 'tool',
         text: `${tool.name}${tool.durationMs != null ? ` ${tool.durationMs}ms` : ''}`,
-        toolName: tool.name,
+        ...toolEventFields(tool.name),
         toolInput: tool.toolInput,
         toolResult: tool.toolResult,
         cleanKeyword: tool.cleanKeyword,
@@ -792,6 +826,9 @@ function buildGatewayMonitorSessions({ seenModelTexts } = {}) {
         type: ev.type,
         text: ev.text,
         toolName: ev.toolName,
+        toolNamespace: ev.toolNamespace,
+        toolBaseName: ev.toolBaseName,
+        toolDisplayName: ev.toolDisplayName,
         toolInput: ev.toolInput,
         toolResult: ev.toolResult,
         cleanKeyword: ev.cleanKeyword,
@@ -903,8 +940,10 @@ function buildConversationTurnsFromSession(params) {
       if (Array.isArray(c) && current) {
         for (const item of c) {
           if (item.type === 'tool_use' || item.type === 'toolCall') {
+            const name = item.name || 'tool'
             const tool = {
-              name: item.name || 'tool',
+              name,
+              ...splitToolName(name),
               status: 'pending',
               argsPreview: item.input ? safeSnippet(JSON.stringify(item.input), 500) : '',
               resultSummary: '',
@@ -1533,7 +1572,7 @@ router.get('/events', async (req, res) => {
                   const toolName = item.name || ''
                   if (toolName) toolChain.push(toolName)
                   const toolText = toolName + (item.input ? ': ' + JSON.stringify(item.input, null, 2) : '')
-                  events.push(attachUsageToEvent({ ...msgTime, ts: tsFormatted, type: 'tool', text: toolText, toolName }))
+                  events.push(attachUsageToEvent({ ...msgTime, ts: tsFormatted, type: 'tool', text: toolText, ...toolEventFields(toolName) }))
                 } else if (item.type === 'text' && item.text) {
                   const lower = item.text.toLowerCase()
                   if (lower.includes('bash') || lower.includes('exec')) {
@@ -1603,7 +1642,7 @@ router.get('/events', async (req, res) => {
                 }
               }
               if (missingTool && !paired) {
-                events.push({ ...msgTime, ts: tsFormatted, type: 'warning', text: `Tool ${missingTool} not found`, toolName: missingTool, toolResult: text.slice(0, 3000) })
+                events.push({ ...msgTime, ts: tsFormatted, type: 'warning', text: `Tool ${missingTool} not found`, ...toolEventFields(missingTool), toolResult: text.slice(0, 3000) })
               }
             }
           }
@@ -1618,7 +1657,7 @@ router.get('/events', async (req, res) => {
             timeMs: lastEvent.timeMs ?? null,
             type: 'warning',
             text: warning.summary,
-            toolName: warning.toolName,
+            ...toolEventFields(warning.toolName),
           })
         }
 
@@ -1659,6 +1698,9 @@ router.get('/events', async (req, res) => {
             type: ev.type,
             text: ev.text,
             toolName: ev.toolName,
+            toolNamespace: ev.toolNamespace,
+            toolBaseName: ev.toolBaseName,
+            toolDisplayName: ev.toolDisplayName,
             toolInput: ev.toolInput,
             toolResult: ev.toolResult,
             cleanKeyword: ev.cleanKeyword,
@@ -2053,6 +2095,7 @@ module.exports = {
     monitorEventTime,
     monitorEventTimeMs,
     sortMonitorEventsDesc,
+    splitToolName,
     summarizeToolLoopWarnings,
   },
 }

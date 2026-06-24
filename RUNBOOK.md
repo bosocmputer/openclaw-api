@@ -9,6 +9,22 @@ Runbook นี้ใช้กับ customer server layout ปัจจุบั
 - Config: `~/.openclaw/openclaw.json`
 - MCP: `http://192.168.2.248:3515/sse`
 
+## Current Release Status
+
+| Component | Expected version / commit | Notes |
+| --------- | ------------------------- | ----- |
+| Runtime | `OpenClaw 2026.6.8 (1c81b77)` | ERP artifact with generic LINE burst coalescing |
+| Runtime artifact SHA256 | `1f4ca1e96d6ea84b7e26da1091f323a50c39e023c18c1e36a100966d55e291e7` | Verify before install |
+| openclaw-api | `645f116` or newer on `main` | LINE burst telemetry parser |
+| openclaw-admin | `bbfe324` or newer on `main` | Monitor badge/details for `LINE grouped` |
+
+Release behavior to watch:
+
+- LINE image + quick follow-up text should be grouped into one turn and appear in `/monitor` as `LINE grouped`.
+- LINE text-only messages should not be delayed.
+- LINE control commands such as `/reset` and `/new` bypass pending burst grouping.
+- Telegram behavior should remain unchanged; still run Telegram regression after runtime updates.
+
 ## Golden Rules
 
 - ห้าม patch `/usr/lib/node_modules/openclaw/dist` โดยไม่มี source/build trace และ deploy metadata
@@ -160,6 +176,50 @@ SLO เริ่มต้น:
 
 ถ้า `telemetry.telegram` warn หลัง restart แต่ยังไม่มีข้อความใหม่ ถือว่าปกติ ให้ทดสอบหลังมี Telegram turn จริง
 
+## LINE Burst Watch
+
+ใช้หลัง update runtime `1c81b77` หรือหลังลูกค้ารายงานว่า LINE ส่งรูปแล้ว bot ไม่ตอบ:
+
+1. เปิด LINE mobile แล้วส่งรูป 1 รูป
+2. พิมพ์ข้อความตามมาภายใน 3 วินาที 1-3 ข้อความ
+3. เปิด Admin `/monitor`
+4. ควรเห็น event หรือ badge `LINE grouped`
+
+ตรวจ log จาก gateway:
+
+```bash
+pm2 logs openclaw-gateway --lines 240 --nostream 2>/dev/null \
+  | grep -E "line_burst_|line_delivery_|line_loading_" || true
+
+journalctl --user -u openclaw-gateway.service -n 240 --no-pager 2>/dev/null \
+  | grep -E "line_burst_|line_delivery_|line_loading_" || true
+```
+
+Marker ที่คาดหวัง:
+
+- `line_burst_start` = runtime เริ่มรอข้อความตามหลัง media
+- `line_burst_append` = มีข้อความ/media เพิ่มใน burst เดียวกัน
+- `line_burst_flush` = runtime รวม burst แล้วส่งเข้า agent
+- `line_burst_bypass` = command/control หรือ event ที่ไม่ควรรวมถูกปล่อยผ่าน
+
+ถ้าไม่มี marker หลังทดสอบ:
+
+- ตรวจ runtime version: `node /root/openclaw-runtime-2026.6.8-erp/dist/index.js --version`
+- ตรวจว่า gateway process ใช้ `/root/openclaw-runtime-2026.6.8-erp/dist/index.js`
+- ตรวจว่า API/Admin อัปเดตแล้ว ถ้า runtime marker มีแต่ UI ไม่แสดง `LINE grouped`
+
+Kill switch เฉพาะ LINE coalescing:
+
+```bash
+grep -q '^export OPENCLAW_LINE_COALESCING=' /root/start-openclaw-gateway.sh \
+  || sed -i '/export PATH=/a export OPENCLAW_LINE_COALESCING=0' /root/start-openclaw-gateway.sh
+
+pm2 restart openclaw-gateway --update-env
+pm2 save
+```
+
+ลบบรรทัด `OPENCLAW_LINE_COALESCING=0` แล้ว restart gateway เพื่อเปิดกลับ
+
 ## Support Bundle
 
 ```bash
@@ -219,6 +279,7 @@ Environment=OPENCLAW_TELEGRAM_LOW_INTENT_COALESCE=0
 Environment=OPENCLAW_TELEGRAM_STOCK_PRICE_DENIAL=0
 Environment=OPENCLAW_TELEGRAM_FOLLOWUP_RESOLVER=0
 Environment=OPENCLAW_TELEGRAM_REPLY_QUALITY_GATE=0
+Environment=OPENCLAW_LINE_COALESCING=0
 ```
 
 จากนั้น:

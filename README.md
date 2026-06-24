@@ -4,6 +4,22 @@ Express.js REST API server สำหรับ OpenClaw Admin — เป็น br
 
 > **หมายเหตุ**: รันบน host โดยตรง (ไม่ใช่ Docker) เพราะต้องการ systemd และ openclaw CLI
 
+## Release Status ล่าสุด
+
+| ส่วน | Baseline |
+| ---- | -------- |
+| Runtime | `OpenClaw 2026.6.8 (1c81b77)` |
+| Runtime artifact | `2026.6.8-erp-20260624-line-burst-coalescing` |
+| openclaw-api | `645f116` หรือใหม่กว่า |
+| openclaw-admin | `bbfe324` หรือใหม่กว่า |
+
+สิ่งที่ API รองรับใน baseline นี้:
+
+- Parse LINE runtime markers เช่น `line_burst_start`, `line_burst_append`, `line_burst_flush`, `line_burst_bypass`
+- ส่ง telemetry ไป `/monitor` เพื่อให้ UI แสดง `LINE grouped`
+- ติด tag `line_burst_coalesced` ใน Conversation Analysis เมื่อพบ turn ที่รวม LINE image + follow-up text
+- ใช้ `OPENCLAW_BIN=/root/openclaw-runtime-2026.6.8-erp/dist/index.js` เพื่อให้ model/image tests เรียก runtime ตัวเดียวกับ gateway จริง
+
 ## ทำหน้าที่อะไร
 
 ```text
@@ -59,6 +75,10 @@ PORT=4000                                                                # port 
 DATABASE_URL=postgresql://openclaw:PASSWORD@localhost:5432/openclaw_admin  # PostgreSQL (สำหรับ members + webchat)
 HOOKS_TOKEN=<random-hex>                                                 # ต้องตรงกับ hooks.token ใน openclaw.json
 ALLOWED_ORIGIN=http://<SERVER_IP>:3000                                   # จำกัด CORS เฉพาะ origin ของ openclaw-admin
+OPENCLAW_BIN=/root/openclaw-runtime-2026.6.8-erp/dist/index.js            # runtime artifact binary สำหรับ model/image test
+CONVERSATION_ANALYSIS_ENABLED=1
+MEMORY_LEARNING_REVIEW_ENABLED=1
+MONITOR_MEDIA_PREVIEW_ENABLED=1
 ```
 
 > `HOOKS_TOKEN` ต้องตรงกับ `hooks.token` ใน `~/.openclaw/openclaw.json` เสมอ — ใช้สำหรับ Webchat ส่งข้อความผ่าน openclaw Hooks API
@@ -81,6 +101,23 @@ node index.js
 ```
 
 ## อัปเดต
+
+Current customer flow:
+
+```bash
+cd /root/openclaw-api
+git pull --ff-only origin main
+npm install
+pm2 restart openclaw-api --update-env
+
+cd /root/openclaw-admin
+git pull --ff-only origin main
+docker compose up -d --build openclaw-admin
+```
+
+Runtime is updated separately from the pinned ERP runtime artifact. See [`CUSTOMER_UPDATE_GUIDE.md`](./CUSTOMER_UPDATE_GUIDE.md).
+
+Legacy updater flow:
 
 ```bash
 cd ~/openclaw-api

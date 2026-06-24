@@ -5,15 +5,23 @@
 
 ## Current Release Baseline
 
-- OpenClaw runtime source commit: `63193a377d` (`fix(telegram): keep model fallback notices out of customer replies`)
-- `openclaw-api` minimum feature commit: `847f125` (`Add model readiness and fallback-aware monitoring`)
-- `openclaw-admin` commit: `48a92d3` (`Add model readiness controls to admin`)
+- OpenClaw runtime source commit: `1c81b77460` (`Add generic LINE burst coalescing`)
+- Runtime version expected after update: `OpenClaw 2026.6.8 (1c81b77)`
+- Runtime artifact: `releases/2026.6.8-erp-20260624-line-burst-coalescing/openclaw-runtime-2026.6.8-erp-latest.tar.gz`
+- Runtime SHA256: `1f4ca1e96d6ea84b7e26da1091f323a50c39e023c18c1e36a100966d55e291e7`
+- `openclaw-api` minimum feature commit: `645f116` (`Track LINE burst telemetry`)
+- `openclaw-admin` minimum feature commit: `bbfe324` (`Update runtime artifact install URL`)
 - MCP image: `ghcr.io/smlsoft/smlmcpconnect:latest` with `search_product` Smart Search v2
 
-The exact API/Admin commits inside a generated artifact are recorded in `release-manifest.json`.
+The exact API/Admin commits inside a generated artifact are recorded in `release-manifest.json` when an artifact package is used. For the current customer flow, API/Admin are usually updated by `git pull --ff-only`, while the runtime is updated from the pinned runtime artifact URL below.
 
 Important runtime behavior:
 
+- LINE image + rapid follow-up text is coalesced into one generic turn. This uses timing, sender, chat, and media/text presence only; no business keyword or question text is hardcoded.
+- LINE text-only messages still dispatch immediately.
+- LINE `/reset`, `/new`, and control commands bypass/cancel pending bursts.
+- `/monitor` should show `LINE grouped` or `line_burst_flush` when an image and follow-up text are grouped.
+- Set `OPENCLAW_LINE_COALESCING=0` and restart gateway to disable this feature quickly.
 - Telegram must not show `This message is not supported on the web version of Telegram`.
 - Telegram must not show `↪️ Model Fallback...` to end users.
 - `/monitor` should show recovered fallback turns as `model_timeout_recovered`, not a hard failure.
@@ -57,7 +65,94 @@ systemctl --user status openclaw-gateway.service --no-pager || true
 docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}' || true
 ```
 
-## 1. Build Artifact On Dev Mac
+## 0. Recommended Customer Update Path For 2026-06-24 Release
+
+Use this path when the customer server already has git checkouts at `/root/openclaw-api` and `/root/openclaw-admin`. It matches the current Chang168 rollout style.
+
+### Update API and Admin
+
+```bash
+cd /root/openclaw-api
+git fetch origin main
+git pull --ff-only origin main
+npm install
+
+grep -q '^OPENCLAW_BIN=' .env \
+  && sed -i 's#^OPENCLAW_BIN=.*#OPENCLAW_BIN=/root/openclaw-runtime-2026.6.8-erp/dist/index.js#' .env \
+  || echo 'OPENCLAW_BIN=/root/openclaw-runtime-2026.6.8-erp/dist/index.js' >> .env
+
+pm2 restart openclaw-api --update-env
+
+cd /root/openclaw-admin
+git fetch origin main
+git pull --ff-only origin main
+docker compose up -d --build openclaw-admin
+```
+
+### Update Runtime Artifact
+
+```bash
+cd /root
+RUNTIME_URL="https://raw.githubusercontent.com/bosocmputer/openclaw-runtime-artifacts/3ede1322c6651657dee4546bcade6efb9e4f7fcd/releases/2026.6.8-erp-20260624-line-burst-coalescing/openclaw-runtime-2026.6.8-erp-latest.tar.gz"
+SHA="1f4ca1e96d6ea84b7e26da1091f323a50c39e023c18c1e36a100966d55e291e7"
+
+BACKUP_ID=$(date +%Y%m%d%H%M%S)
+mkdir -p /root/openclaw-backups/$BACKUP_ID
+cp -a /root/openclaw-runtime-2026.6.8-erp /root/openclaw-backups/$BACKUP_ID/openclaw-runtime-2026.6.8-erp 2>/dev/null || true
+cp -a /root/start-openclaw-gateway.sh /root/openclaw-backups/$BACKUP_ID/start-openclaw-gateway.sh 2>/dev/null || true
+
+curl -fL -o openclaw-runtime-2026.6.8-erp-latest.tar.gz "$RUNTIME_URL"
+echo "$SHA  openclaw-runtime-2026.6.8-erp-latest.tar.gz" | sha256sum -c -
+
+rm -rf /root/openclaw-runtime-2026.6.8-erp
+tar -xzf openclaw-runtime-2026.6.8-erp-latest.tar.gz -C /root --no-same-owner
+
+node /root/openclaw-runtime-2026.6.8-erp/dist/index.js --version
+pm2 restart openclaw-gateway --update-env
+pm2 restart openclaw-api --update-env
+pm2 save
+ss -ltnp | grep 18789 || true
+```
+
+Expected version:
+
+```text
+OpenClaw 2026.6.8 (1c81b77)
+```
+
+### Smoke Test Current Release
+
+Telegram:
+
+1. `/reset`
+2. `สวัสดี`
+3. Search/stock/price prompt relevant to the customer
+4. Product image if image understanding is enabled
+
+LINE:
+
+1. `สวัสดี`
+2. Send one image
+3. Within 3 seconds, send one or more follow-up text messages
+4. Open `/monitor`; expected marker/badge: `LINE grouped` or `line_burst_flush`
+
+If LINE grouping causes unexpected behavior, disable only this feature and restart gateway:
+
+```bash
+grep -q '^export OPENCLAW_LINE_COALESCING=' /root/start-openclaw-gateway.sh \
+  || sed -i '/export PATH=/a export OPENCLAW_LINE_COALESCING=0' /root/start-openclaw-gateway.sh
+
+pm2 restart openclaw-gateway --update-env
+pm2 save
+```
+
+When the issue is resolved, remove the `OPENCLAW_LINE_COALESCING=0` line and restart gateway.
+
+## 1. Legacy Artifact Package Flow
+
+Use the following sections only when preparing a full API/Admin/runtime tarball with `release-manifest.json`. The current preferred customer path is the pinned runtime artifact plus API/Admin git pull flow above.
+
+### Build Artifact On Dev Mac
 
 Build OpenClaw runtime first so `dist/` contains the source commit above.
 Use the gateway/runtime profile for customer packages; it is much faster than the full UI/SDK build and includes the Telegram gateway files this release needs:
@@ -359,6 +454,25 @@ Pass criteria:
 - `/monitor` shows model/tool chain, model used, token/cost only for model calls
 - if primary model times out but fallback succeeds, monitor shows recovered warning, not a hard failed turn
 
+## 10.1 LINE Regression Smoke
+
+Test with the real LINE OA on a mobile client when possible:
+
+1. `สวัสดี`
+2. Send one image without caption
+3. Within 3 seconds, send one or more follow-up text messages
+4. Send `/reset`
+5. Send another normal text message
+
+Pass criteria:
+
+- normal text replies without extra delay
+- image + rapid text is handled as one conversational turn
+- `/monitor` shows `LINE grouped` or `line_burst_flush`
+- loading animation may appear on LINE mobile while the agent works
+- no session remains stuck after the image turn
+- `/reset` bypasses any pending burst and responds quickly
+
 ## 11. Rollback
 
 Use the backup id from apply output:
@@ -387,11 +501,11 @@ cd "$ADMIN_DIR" && docker compose ps
 
 ## 12. When Git Pull Is Acceptable
 
-Use git pull only for API/Admin when all are true:
+For the current 2026-06-24 release, git pull is the preferred API/Admin update path when all are true:
 
 - customer server has clean repos
 - latest commits are pushed
-- runtime update is not needed, or runtime package is already published officially
+- runtime is updated separately from the pinned ERP artifact URL in section 0
 - no root-owned copy barrier blocks deploy
 
 Commands:
@@ -410,4 +524,4 @@ git pull --ff-only origin main
 docker compose up -d --build openclaw-admin
 ```
 
-For this release, artifact deploy is preferred because the runtime fallback-notice fix must move together with API/Admin.
+For this release, do not use the legacy generated tarball unless git pull is blocked. Keep API/Admin and runtime in sync by using section 0, then run both Telegram and LINE regression smoke tests.

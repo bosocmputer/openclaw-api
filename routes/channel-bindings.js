@@ -121,7 +121,7 @@ router.post('/apply', async (req, res) => {
       restart,
       durationMs: durationSince(startedAt),
       safeMessage: shouldRestartGateway
-        ? 'Agent binding applied. Send /reset in the channel, then test the new agent.'
+        ? 'Agent binding applied. Existing channel sessions were reset; the next message will use the new agent.'
         : 'Agent binding saved. Restart Gateway before testing the new agent.',
     }
     logApplyResult(result)

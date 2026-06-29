@@ -20,6 +20,42 @@ test('explicit teaching becomes a staff instruction observation without auto tru
   assert.match(observation.summary, /ลูกค้ารายนี้/)
 })
 
+test('explicit ERP value teaching is blocked instead of promoted', () => {
+  const observation = memoryAuto._internal.explicitTeachingObservation({
+    id: 'turn-price',
+    agentId: 'stock',
+    channel: 'telegram',
+    userText: 'จำไว้ว่า น้ำมันเครื่องตัวนี้ราคา 620 บาท',
+  })
+
+  assert.ok(observation)
+  assert.equal(observation.type, 'blocked_fact')
+  assert.equal(observation.risk, 'high')
+  assert.equal(observation.recommendedAction, 'block_truth')
+  assert.match(observation.summary, /ห้ามจำเป็นข้อมูลถาวร/)
+})
+
+test('observations avoid duplicate staff instruction when teaching blocked ERP values', () => {
+  const observations = memoryAuto._internal.observationsFromTurn({
+    id: 'turn-stock',
+    agentId: 'stock',
+    channel: 'telegram',
+    userText: 'จำไว้ว่า สินค้านี้มีสต็อก 7 ชิ้น',
+    issues: [{
+      tag: 'unsupported_capability',
+      label: 'Unsupported capability',
+      reviewTarget: 'business capability',
+      severity: 'issue',
+      evidence: { userPreview: 'จำไว้ว่า สินค้านี้มีสต็อก 7 ชิ้น' },
+    }],
+  })
+
+  assert.equal(observations.length, 1)
+  assert.equal(observations[0].type, 'blocked_fact')
+  assert.equal(observations[0].risk, 'high')
+  assert.equal(observations.some(item => item.type === 'staff_instruction'), false)
+})
+
 test('price and capability issues are classified as blocked facts', () => {
   const observation = memoryAuto._internal.issueToObservation({
     id: 'turn-2',

@@ -107,3 +107,63 @@ test('memory enum validators reject invalid values', () => {
   assert.throws(() => memoryAuto._internal.normalizeMemoryScope('customer-server'), /scope is invalid/)
   assert.throws(() => memoryAuto._internal.normalizePolicyMode('auto-everything'), /mode is invalid/)
 })
+
+test('safe auto promotes only policy-safe observations and blocks high risk', () => {
+  const policy = {
+    mode: 'safe_auto',
+    safeTypes: ['terminology', 'workflow_hint', 'entity_alias'],
+    allowChatTeaching: true,
+  }
+
+  assert.equal(memoryAuto._internal.canAutoPromoteObservation({
+    status: 'observed',
+    type: 'terminology',
+    risk: 'low',
+    recommendedAction: 'observe',
+    evidence: {},
+  }, policy), true)
+
+  assert.equal(memoryAuto._internal.canAutoPromoteObservation({
+    status: 'observed',
+    type: 'staff_instruction',
+    risk: 'medium',
+    recommendedAction: 'policy_promote',
+    evidence: { source: 'explicit_chat_teaching' },
+  }, policy), true)
+
+  assert.equal(memoryAuto._internal.canAutoPromoteObservation({
+    status: 'observed',
+    type: 'entity_alias',
+    risk: 'low',
+    recommendedAction: 'mcp_search_review',
+    evidence: {},
+  }, policy), false)
+
+  assert.equal(memoryAuto._internal.canAutoPromoteObservation({
+    status: 'observed',
+    type: 'blocked_fact',
+    risk: 'high',
+    recommendedAction: 'block_truth',
+    evidence: {},
+  }, policy), true)
+})
+
+test('auto learned block is replaced without touching other memory sections', () => {
+  const current = [
+    '# Long-Term Memory',
+    '',
+    '<!-- OPENCLAW_AUTO_LEARN_MEMORY_START -->',
+    '- old',
+    '<!-- OPENCLAW_AUTO_LEARN_MEMORY_END -->',
+    '',
+    '## Manual Notes',
+    '- keep me',
+    '',
+  ].join('\n')
+  const next = memoryAuto._internal.replaceAutoMemoryBlock(current, ['- [term] โช๊ค = โช้คอัพ'])
+  assert.match(next, /# Long-Term Memory/)
+  assert.match(next, /Auto-Learned Business Memory/)
+  assert.match(next, /\[term\] โช๊ค = โช้คอัพ/)
+  assert.doesNotMatch(next, /- old/)
+  assert.match(next, /## Manual Notes\n- keep me/)
+})

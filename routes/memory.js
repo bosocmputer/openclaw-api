@@ -254,6 +254,18 @@ router.put('/policies/:agentId', requirePg, async (req, res) => {
   }
 })
 
+// POST /api/memory/policies/:agentId/apply-auto-learn
+router.post('/policies/:agentId/apply-auto-learn', requirePg, async (req, res) => {
+  try {
+    res.json(await memoryAuto.applyAutoLearnForAgent(req.params.agentId, {
+      actor: adminActor(req) || 'admin',
+      limit: req.body?.limit || 200,
+    }))
+  } catch (err) {
+    safeError(res, err)
+  }
+})
+
 // GET /api/memory/usage
 router.get('/usage', requirePg, async (req, res) => {
   try {

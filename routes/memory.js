@@ -5,6 +5,7 @@ const { HOME } = require('../lib/config')
 const { readOpenclawConfig } = require('../lib/openclaw-config')
 const { requirePg } = require('../lib/pg')
 const memoryLearning = require('../lib/memory-learning')
+const memoryAuto = require('../lib/memory-auto')
 
 function adminActor(req) {
   return req.headers['x-openclaw-admin-user'] || null
@@ -86,11 +87,14 @@ function memorySizeInfo(sizeChars, config) {
 }
 
 // GET /api/memory/status
-router.get('/status', (req, res) => {
+router.get('/status', async (req, res) => {
   try {
     const config = readOpenclawConfig()
     const agents = config.agents?.list ?? []
     const dreaming = getDreamingConfig(config)
+    const autoSummary = memoryAuto.isAvailable()
+      ? await memoryAuto.summaryForAgents(agents.map(agent => agent.id).filter(Boolean)).catch(() => ({}))
+      : {}
 
     const result = agents.map(agent => {
       const workspacePath = agent.workspace.replace('~', HOME)
@@ -137,12 +141,129 @@ router.get('/status', (req, res) => {
           files: daily.files,
         },
         dreaming,
+        autoLearn: {
+          autoLearnMode: autoSummary[agent.id]?.autoLearnMode || 'observe_only',
+          activeMemoryCount: autoSummary[agent.id]?.activeMemoryCount || 0,
+          softMemoryCount: autoSummary[agent.id]?.softMemoryCount || 0,
+          blockedCount: autoSummary[agent.id]?.blockedCount || 0,
+          deletedCount: autoSummary[agent.id]?.deletedCount || 0,
+          estimatedInjectedChars: autoSummary[agent.id]?.estimatedInjectedChars || 0,
+          maxContextChars: autoSummary[agent.id]?.maxContextChars || 1200,
+        },
       }
     })
     res.json(result)
   } catch (e) {
     console.error('[openclaw-api]', req.method, req.path, e.message)
     res.status(500).json({ error: 'Internal server error' })
+  }
+})
+
+// GET /api/memory/memories
+router.get('/memories', requirePg, async (req, res) => {
+  try {
+    res.json(await memoryAuto.listMemories({
+      agentId: req.query.agentId,
+      status: req.query.status,
+      type: req.query.type,
+      scope: req.query.scope,
+      q: req.query.q,
+      limit: req.query.limit,
+    }))
+  } catch (err) {
+    safeError(res, err)
+  }
+})
+
+// POST /api/memory/memories
+router.post('/memories', requirePg, async (req, res) => {
+  try {
+    res.status(201).json(await memoryAuto.createMemory(req.body, adminActor(req)))
+  } catch (err) {
+    safeError(res, err)
+  }
+})
+
+// PATCH /api/memory/memories/:id
+router.patch('/memories/:id', requirePg, async (req, res) => {
+  try {
+    res.json(await memoryAuto.updateMemory(req.params.id, req.body, adminActor(req)))
+  } catch (err) {
+    safeError(res, err)
+  }
+})
+
+// DELETE /api/memory/memories/:id
+router.delete('/memories/:id', requirePg, async (req, res) => {
+  try {
+    res.json(await memoryAuto.deleteMemory(req.params.id, req.query, adminActor(req)))
+  } catch (err) {
+    safeError(res, err)
+  }
+})
+
+// POST /api/memory/memories/:id/block-relearn
+router.post('/memories/:id/block-relearn', requirePg, async (req, res) => {
+  try {
+    res.json(await memoryAuto.blockRelearn(req.params.id, req.body, adminActor(req)))
+  } catch (err) {
+    safeError(res, err)
+  }
+})
+
+// GET /api/memory/observations
+router.get('/observations', requirePg, async (req, res) => {
+  try {
+    res.json(await memoryAuto.listObservations({
+      agentId: req.query.agentId,
+      status: req.query.status,
+      type: req.query.type,
+      q: req.query.q,
+      sourceTurnId: req.query.sourceTurnId,
+      limit: req.query.limit,
+    }))
+  } catch (err) {
+    safeError(res, err)
+  }
+})
+
+// POST /api/memory/observations/:id/promote
+router.post('/observations/:id/promote', requirePg, async (req, res) => {
+  try {
+    res.json(await memoryAuto.promoteObservation(req.params.id, req.body, adminActor(req)))
+  } catch (err) {
+    safeError(res, err)
+  }
+})
+
+// GET /api/memory/policies
+router.get('/policies', requirePg, async (req, res) => {
+  try {
+    res.json(await memoryAuto.listPolicies())
+  } catch (err) {
+    safeError(res, err)
+  }
+})
+
+// PUT /api/memory/policies/:agentId
+router.put('/policies/:agentId', requirePg, async (req, res) => {
+  try {
+    res.json(await memoryAuto.upsertPolicy(req.params.agentId, req.body, adminActor(req)))
+  } catch (err) {
+    safeError(res, err)
+  }
+})
+
+// GET /api/memory/usage
+router.get('/usage', requirePg, async (req, res) => {
+  try {
+    res.json(await memoryAuto.listUsage({
+      turnId: req.query.turnId,
+      agentId: req.query.agentId,
+      limit: req.query.limit,
+    }))
+  } catch (err) {
+    safeError(res, err)
   }
 })
 

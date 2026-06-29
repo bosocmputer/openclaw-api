@@ -103,42 +103,44 @@ test('model timeout warnings are classified without leaking long payloads', () =
 test('conversation turn is recovered when fallback succeeds after a model timeout', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'openclaw-monitor-session-'))
   const file = path.join(dir, 'session.jsonl')
+  const baseMs = Date.now() - 60_000
+  const iso = offsetMs => new Date(baseMs + offsetMs).toISOString()
   const lines = [
     {
       role: 'user',
-      timestamp: '2026-06-18T03:25:33.824Z',
+      timestamp: iso(0),
       content: 'ขอเช็คยอด TEST-001',
     },
     {
       role: 'assistant',
-      timestamp: '2026-06-18T03:25:35.973Z',
+      timestamp: iso(2149),
       stopReason: 'error',
       errorMessage: 'LLM request timed out. rawError=Provider finish_reason: error',
       content: [],
     },
     {
       role: 'assistant',
-      timestamp: '2026-06-18T03:25:38.585Z',
+      timestamp: iso(4761),
       content: [{ type: 'tool_use', name: 'stock__search_product', input: { keyword: 'TEST-001' } }],
     },
     {
       role: 'toolResult',
-      timestamp: '2026-06-18T03:25:39.025Z',
+      timestamp: iso(5201),
       content: '{"status":"resolved","selected":{"code":"TEST-001","name":"สินค้าทดสอบ"}}',
     },
     {
       role: 'assistant',
-      timestamp: '2026-06-18T03:25:40.175Z',
+      timestamp: iso(6351),
       content: [{ type: 'tool_use', name: 'stock__get_stock_balance', input: { code: 'TEST-001' } }],
     },
     {
       role: 'toolResult',
-      timestamp: '2026-06-18T03:25:40.202Z',
+      timestamp: iso(6378),
       content: '{"code":"TEST-001","found":0,"stocks":[]}',
     },
     {
       role: 'assistant',
-      timestamp: '2026-06-18T03:25:40.940Z',
+      timestamp: iso(7116),
       content: [{ type: 'text', text: 'ไม่พบยอดคงเหลือสินค้า TEST-001 ในคลังครับ' }],
     },
   ]
@@ -381,15 +383,17 @@ test('monitor extracts runtime MediaPath fields and returns only safe preview id
 test('media-only user messages become conversation turns with a safe placeholder', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'openclaw-monitor-media-'))
   const file = path.join(dir, 'session.jsonl')
+  const baseMs = Date.now() - 60_000
+  const iso = offsetMs => new Date(baseMs + offsetMs).toISOString()
   const lines = [
     {
       role: 'user',
-      timestamp: '2026-06-18T03:25:33.824Z',
+      timestamp: iso(0),
       content: [{ type: 'image', mimeType: 'image/jpeg', mediaRef: 'media://telegram/file-redacted', fileName: 'photo.jpg' }],
     },
     {
       role: 'assistant',
-      timestamp: '2026-06-18T03:25:38.585Z',
+      timestamp: iso(4761),
       content: [{ type: 'text', text: 'ผมเห็นรูปแล้วครับ' }],
     },
   ]

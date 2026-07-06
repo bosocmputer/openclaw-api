@@ -1,29 +1,32 @@
 # OpenClaw Production Runbook
 
-Runbook นี้ใช้กับ customer server layout ปัจจุบัน:
+Runbook นี้ใช้กับ customer/server layout ปัจจุบัน. Dev server อาจใช้ `$HOME`, ส่วน customer ส่วนใหญ่ใช้ `/root`; ตรวจ path จริงก่อน copy/paste ทุกครั้ง.
 
-- Server: `192.168.2.109`
-- API: `~/openclaw-api`, PM2 process `openclaw-api`, port `4000`
-- Admin: `~/openclaw-admin`, Docker Compose service `openclaw-admin`, port `3000`
-- Runtime gateway: `systemctl --user restart openclaw-gateway.service`
-- Config: `~/.openclaw/openclaw.json`
+- Dev server: `192.168.2.109`
+- Customer example: `chang168.thddns.net`
+- API: `/root/openclaw-api` or `~/openclaw-api`, PM2 process `openclaw-api`, port `4000`
+- Admin: `/root/openclaw-admin` or `~/openclaw-admin`, Docker Compose service `openclaw-admin`, port `3000`
+- Runtime gateway: PM2 process `openclaw-gateway` using `/root/openclaw-runtime-2026.6.11-erp/dist/index.js`
+- Config: `/root/.openclaw/openclaw.json` or `~/.openclaw/openclaw.json`
 - MCP: `http://192.168.2.248:3515/sse`
 
 ## Current Release Status
 
 | Component | Expected version / commit | Notes |
 | --------- | ------------------------- | ----- |
-| Runtime | `OpenClaw 2026.6.8 (1c81b77)` | ERP artifact with generic LINE burst coalescing |
-| Runtime artifact SHA256 | `1f4ca1e96d6ea84b7e26da1091f323a50c39e023c18c1e36a100966d55e291e7` | Verify before install |
-| openclaw-api | `645f116` or newer on `main` | LINE burst telemetry parser |
-| openclaw-admin | `bbfe324` or newer on `main` | Monitor badge/details for `LINE grouped` |
+| Runtime | `OpenClaw 2026.6.11` + ERP overlay | Generic LINE image/text coalescing and text-only fast path |
+| Runtime overlay SHA256 | `a26156d0440b4d6010d89c98a94cdefa8f0d51693762874bde0d607175f94a99` | Verify before install |
+| Runtime overlay commits | `f608a18664`, `9976b9bbd7`, `fe432925eb` | sidebar export fix, LINE media burst, no delay for standalone text |
+| openclaw-api | `3166394` or newer on `main` | Provider/model, memory, analysis, health, media support |
+| openclaw-admin | `a767392` or newer on `main` | Current Admin UX and docs |
 
 Release behavior to watch:
 
-- LINE image + quick follow-up text should be grouped into one turn and appear in `/monitor` as `LINE grouped`.
+- LINE image + quick follow-up text should be grouped into one turn. `/monitor` should show the latest turn; structured `line_burst_*` markers are useful but not the sole release gate.
 - LINE text-only messages should not be delayed.
 - LINE control commands such as `/reset` and `/new` bypass pending burst grouping.
 - Telegram behavior should remain unchanged; still run Telegram regression after runtime updates.
+- Auto-Learn must not memorize dynamic ERP facts. Price, stock, cost, availability, credit, and substitute products must come from MCP/SML tools.
 
 ## Golden Rules
 
@@ -178,12 +181,12 @@ SLO เริ่มต้น:
 
 ## LINE Burst Watch
 
-ใช้หลัง update runtime `1c81b77` หรือหลังลูกค้ารายงานว่า LINE ส่งรูปแล้ว bot ไม่ตอบ:
+ใช้หลัง update runtime overlay `fe432925` หรือหลังลูกค้ารายงานว่า LINE ส่งรูปแล้ว bot ไม่ตอบ:
 
 1. เปิด LINE mobile แล้วส่งรูป 1 รูป
 2. พิมพ์ข้อความตามมาภายใน 3 วินาที 1-3 ข้อความ
 3. เปิด Admin `/monitor`
-4. ควรเห็น event หรือ badge `LINE grouped`
+4. ควรได้คำตอบที่ใช้ทั้งรูปและข้อความตามหลังเป็นบริบทเดียวกัน และ `/reset` ต้องตอบเร็ว
 
 ตรวจ log จาก gateway:
 
@@ -202,11 +205,16 @@ Marker ที่คาดหวัง:
 - `line_burst_flush` = runtime รวม burst แล้วส่งเข้า agent
 - `line_burst_bypass` = command/control หรือ event ที่ไม่ควรรวมถูกปล่อยผ่าน
 
-ถ้าไม่มี marker หลังทดสอบ:
+ถ้าไม่มี marker หลังทดสอบ แต่ behavior ผ่าน:
 
-- ตรวจ runtime version: `node /root/openclaw-runtime-2026.6.8-erp/dist/index.js --version`
-- ตรวจว่า gateway process ใช้ `/root/openclaw-runtime-2026.6.8-erp/dist/index.js`
-- ตรวจว่า API/Admin อัปเดตแล้ว ถ้า runtime marker มีแต่ UI ไม่แสดง `LINE grouped`
+- ถือว่า deploy ผ่านได้ แต่ให้จดไว้ว่า telemetry marker ยังไม่ครบ
+- ตรวจ `/analysis/conversations` ว่ามี turn ล่าสุดและ media metadata สำหรับ export
+
+ถ้าไม่มี marker และ behavior ไม่ผ่าน:
+
+- ตรวจ runtime version: `node /root/openclaw-runtime-2026.6.11-erp/dist/index.js --version`
+- ตรวจว่า gateway process ใช้ `/root/openclaw-runtime-2026.6.11-erp/dist/index.js`
+- ตรวจว่า API/Admin อัปเดตแล้ว และ `/monitor` แสดง turn ล่าสุด
 
 Kill switch เฉพาะ LINE coalescing:
 

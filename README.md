@@ -2,23 +2,26 @@
 
 Express.js REST API server สำหรับ OpenClaw Admin — เป็น bridge ระหว่าง Web UI และ OpenClaw config/CLI บน server
 
-> **หมายเหตุ**: รันบน host โดยตรง (ไม่ใช่ Docker) เพราะต้องการ systemd และ openclaw CLI
+> **หมายเหตุ**: รันบน host โดยตรง (ไม่ใช่ Docker) เพราะต้องเข้าถึง OpenClaw runtime, PM2/systemd, config และ workspace files
 
 ## Release Status ล่าสุด
 
 | ส่วน | Baseline |
 | ---- | -------- |
-| Runtime | `OpenClaw 2026.6.8 (1c81b77)` |
-| Runtime artifact | `2026.6.8-erp-20260624-line-burst-coalescing` |
-| openclaw-api | `645f116` หรือใหม่กว่า |
-| openclaw-admin | `bbfe324` หรือใหม่กว่า |
+| Runtime | `OpenClaw 2026.6.11` + ERP overlay |
+| Runtime overlay | `openclaw-runtime-2026.6.11-erp-line-burst-fe432925.tgz` |
+| Runtime overlay SHA256 | `a26156d0440b4d6010d89c98a94cdefa8f0d51693762874bde0d607175f94a99` |
+| Runtime source commits | `f608a18664`, `9976b9bbd7`, `fe432925eb` |
+| openclaw-api | `3166394` หรือใหม่กว่า |
+| openclaw-admin | `a767392` หรือใหม่กว่า |
 
 สิ่งที่ API รองรับใน baseline นี้:
 
-- Parse LINE runtime markers เช่น `line_burst_start`, `line_burst_append`, `line_burst_flush`, `line_burst_bypass`
-- ส่ง telemetry ไป `/monitor` เพื่อให้ UI แสดง `LINE grouped`
-- ติด tag `line_burst_coalesced` ใน Conversation Analysis เมื่อพบ turn ที่รวม LINE image + follow-up text
-- ใช้ `OPENCLAW_BIN=/root/openclaw-runtime-2026.6.8-erp/dist/index.js` เพื่อให้ model/image tests เรียก runtime ตัวเดียวกับ gateway จริง
+- LINE image + rapid follow-up text works as one generic turn in runtime; text-only LINE messages are not delayed.
+- Parse LINE/runtime/media markers when available and expose safe monitor/analysis metadata without leaking local paths or tokens.
+- Model admin supports runtime-verified text/image tests and provider catalog flow, including OpenRouter, Kilo, and `ollama-cloud`.
+- Auto-Learn hardening is default-deny: dynamic ERP facts such as price, stock, cost, availability, credit, and substitute products must come from MCP/SML tools, not memory.
+- ใช้ `OPENCLAW_BIN=/root/openclaw-runtime-2026.6.11-erp/dist/index.js` เพื่อให้ model/image tests เรียก runtime ตัวเดียวกับ gateway จริง
 
 ## ทำหน้าที่อะไร
 
@@ -48,8 +51,8 @@ SML MCP Connect (SSE/tools endpoint)
 ## Requirements
 
 - Node.js 22+
-- openclaw CLI (`npm install -g openclaw`)
-- openclaw-gateway รันเป็น systemd service อยู่แล้ว
+- openclaw CLI (`npm install -g openclaw`) สำหรับ config helper
+- openclaw-gateway รันผ่าน PM2 หรือ systemd โดยชี้ไปที่ ERP runtime overlay
 - PostgreSQL 16+ (สำหรับ /api/members และ /api/webchat/* endpoints)
 
 ## ติดตั้ง
@@ -75,10 +78,11 @@ PORT=4000                                                                # port 
 DATABASE_URL=postgresql://openclaw:PASSWORD@localhost:5432/openclaw_admin  # PostgreSQL (สำหรับ members + webchat)
 HOOKS_TOKEN=<random-hex>                                                 # ต้องตรงกับ hooks.token ใน openclaw.json
 ALLOWED_ORIGIN=http://<SERVER_IP>:3000                                   # จำกัด CORS เฉพาะ origin ของ openclaw-admin
-OPENCLAW_BIN=/root/openclaw-runtime-2026.6.8-erp/dist/index.js            # runtime artifact binary สำหรับ model/image test
+OPENCLAW_BIN=/root/openclaw-runtime-2026.6.11-erp/dist/index.js            # runtime overlay binary สำหรับ model/image test
 CONVERSATION_ANALYSIS_ENABLED=1
 MEMORY_LEARNING_REVIEW_ENABLED=1
 MONITOR_MEDIA_PREVIEW_ENABLED=1
+OLLAMA_API_KEY=...                                                         # optional: Ollama Cloud provider
 ```
 
 > `HOOKS_TOKEN` ต้องตรงกับ `hooks.token` ใน `~/.openclaw/openclaw.json` เสมอ — ใช้สำหรับ Webchat ส่งข้อความผ่าน openclaw Hooks API
@@ -115,7 +119,7 @@ git pull --ff-only origin main
 docker compose up -d --build openclaw-admin
 ```
 
-Runtime is updated separately from the pinned ERP runtime artifact. See [`CUSTOMER_UPDATE_GUIDE.md`](./CUSTOMER_UPDATE_GUIDE.md).
+Runtime is updated separately from API/Admin by applying the pinned ERP runtime overlay. See [`CUSTOMER_UPDATE_GUIDE.md`](./CUSTOMER_UPDATE_GUIDE.md).
 
 Legacy updater flow:
 

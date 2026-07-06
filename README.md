@@ -15,7 +15,7 @@ Express.js REST API server สำหรับ OpenClaw Admin — เป็น br
 | openclaw-api | `b32f1f0` หรือใหม่กว่า |
 | openclaw-admin | `adba0bb` หรือใหม่กว่า |
 
-> Runtime target path คือ `/root/openclaw-runtime-2026.6.11-erp/dist/index.js`. บางเครื่องที่ upgrade จาก skeleton 2026.6.8 อาจยังแสดง `OpenClaw 2026.6.8` ใน `--version`; ให้ verify ด้วย overlay markers และ smoke test แทน version string อย่างเดียว.
+> Runtime target path คือ `/root/openclaw-runtime-2026.6.11-erp/dist/index.js`. สำหรับ production ปัจจุบันให้ใช้ base runtime 2026.6.11 จริง โดย `node ... --version` ควรแสดง `OpenClaw 2026.6.11 (fe43292)` หรือใหม่กว่า. Overlay-only บน skeleton 2026.6.8 เป็น legacy LINE-only emergency path และไม่พอสำหรับ provider ใหม่อย่าง `ollama-cloud`.
 
 สิ่งที่ API รองรับใน baseline นี้:
 
@@ -121,7 +121,7 @@ git pull --ff-only origin main
 docker compose up -d --build openclaw-admin
 ```
 
-Runtime is updated separately from API/Admin by applying the pinned ERP runtime overlay. See [`CUSTOMER_UPDATE_GUIDE.md`](./CUSTOMER_UPDATE_GUIDE.md).
+Runtime is updated separately from API/Admin. Preferred customer flow is a full 2026.6.11 runtime build from `bosocmputer/openclaw` branch `codex/openclaw-2026.6.11-erp-line-burst`; the small overlay tarball is only for an already-correct 2026.6.11 runtime. See [`CUSTOMER_UPDATE_GUIDE.md`](./CUSTOMER_UPDATE_GUIDE.md).
 
 Legacy updater flow:
 

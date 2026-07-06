@@ -13,9 +13,13 @@
 - `openclaw-admin` minimum feature commit: `adba0bb`
 - MCP image: `ghcr.io/smlsoft/smlmcpconnect:latest` with `search_product` Smart Search v2
 
-The exact API/Admin commits inside a generated artifact are recorded in `release-manifest.json` when an artifact package is used. For the current customer flow, API/Admin are usually updated by `git pull --ff-only`, while the runtime is updated by applying the small overlay tarball to the pinned 2026.6.11 runtime directory.
+The exact API/Admin commits inside a generated artifact are recorded in `release-manifest.json` when an artifact package is used. For the current customer flow, API/Admin are usually updated by `git pull --ff-only`, while the runtime must run from the pinned 2026.6.11 ERP runtime directory.
 
-Runtime version note: customer servers upgraded from the older ERP skeleton may still print `OpenClaw 2026.6.8` from `node ... --version` after applying this overlay. That alone is not a failure. The release gate is checksum + gateway path + overlay markers + LINE/Telegram smoke tests.
+Runtime version gate:
+
+- Preferred path: install/build a real 2026.6.11 runtime from `bosocmputer/openclaw` branch `codex/openclaw-2026.6.11-erp-line-burst`. `node ... --version` must print `OpenClaw 2026.6.11 (fe43292)` or newer.
+- Overlay-only path: apply `openclaw-runtime-2026.6.11-erp-line-burst-fe432925.tgz` only when the target runtime is already a 2026.6.11 base runtime, or as a legacy emergency LINE-only patch.
+- Do not accept `OpenClaw 2026.6.8` as production-ready when using newer runtime capabilities such as `ollama-cloud`. In that case the model runtime test must show `runtimeVersion: OpenClaw 2026.6.11 (fe43292)`.
 
 Important runtime behavior:
 
@@ -67,9 +71,9 @@ systemctl --user status openclaw-gateway.service --no-pager || true
 docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}' || true
 ```
 
-## 0. Recommended Customer Update Path For 2026-07-06 Overlay
+## 0. Recommended Customer Update Path For 2026-07-06 Runtime
 
-Use this path when the customer server already has git checkouts at `/root/openclaw-api` and `/root/openclaw-admin`, and has an existing runtime skeleton. If `/root/openclaw-runtime-2026.6.11-erp` is missing but `/root/openclaw-runtime-2026.6.8-erp` exists, copy the old skeleton into the new target path before applying the overlay. It matches the current Chang168 rollout style.
+Use this path when the customer server already has git checkouts at `/root/openclaw-api` and `/root/openclaw-admin`. The default is now a full 2026.6.11 runtime build from source so provider behavior such as `ollama-cloud` matches dev and customer environments. The overlay tarball remains useful for patching an already-correct 2026.6.11 runtime, but copying a 2026.6.8 skeleton is legacy-only.
 
 ### Update API and Admin
 
@@ -91,23 +95,90 @@ git pull --ff-only origin main
 docker compose up -d --build openclaw-admin
 ```
 
-### Download And Apply Runtime Overlay
+### Install Or Refresh Full Runtime 2026.6.11
 
 ```bash
 cd /root
 RUNTIME=/root/openclaw-runtime-2026.6.11-erp
-OLD_RUNTIME=/root/openclaw-runtime-2026.6.8-erp
+NEW_RUNTIME=/root/openclaw-runtime-2026.6.11-erp.new
+BACKUP=/root/openclaw-runtime-2026.6.11-erp.bak-$(date +%Y%m%d-%H%M%S)
+
+pm2 stop openclaw-gateway || true
+
+if [ -d "$RUNTIME" ]; then
+  mv "$RUNTIME" "$BACKUP"
+fi
+
+rm -rf "$NEW_RUNTIME"
+git clone --depth 1 \
+  --branch codex/openclaw-2026.6.11-erp-line-burst \
+  https://github.com/bosocmputer/openclaw.git \
+  "$NEW_RUNTIME"
+
+cd "$NEW_RUNTIME"
+git rev-parse --short HEAD
+corepack enable
+corepack prepare pnpm@11.2.2 --activate
+pnpm install --frozen-lockfile
+pnpm build:docker
+
+node "$NEW_RUNTIME/dist/index.js" --version
+mv "$NEW_RUNTIME" "$RUNTIME"
+```
+
+Create the gateway start script. It intentionally sources `/root/openclaw-api/.env` so runtime providers see the same keys as API model tests.
+
+```bash
+cat > /root/start-openclaw-gateway.sh <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+export HOME=/root
+export PATH=/root/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+set -a
+[ -f /root/openclaw-api/.env ] && . /root/openclaw-api/.env
+set +a
+
+exec /usr/bin/node /root/openclaw-runtime-2026.6.11-erp/dist/index.js gateway --port 18789
+SH
+
+chmod +x /root/start-openclaw-gateway.sh
+
+pm2 delete openclaw-gateway || true
+pm2 start /root/start-openclaw-gateway.sh --name openclaw-gateway --cwd /root
+pm2 restart openclaw-api --update-env
+pm2 save
+
+sleep 8
+node /root/openclaw-runtime-2026.6.11-erp/dist/index.js --version
+grep -R "textWindowMs.*0\\|line_burst_preflight\\|line_delivery_attempt" -n /root/openclaw-runtime-2026.6.11-erp/dist | head -30
+ps -ef | grep -E "openclaw-runtime-2026.6.11-erp|openclaw.*gateway" | grep -v grep || true
+ss -ltnp | grep 18789 || true
+```
+
+Expected verification:
+
+- Process uses `/root/openclaw-runtime-2026.6.11-erp/dist/index.js`
+- Marker grep shows `line_burst_preflight` and `line_delivery_attempt`
+- `node ... --version` prints `OpenClaw 2026.6.11 (fe43292)` or newer
+- `/model` runtime test for `ollama-cloud/...` passes with `runtimeVersion: OpenClaw 2026.6.11 (fe43292)` when Ollama Cloud is enabled
+
+### Overlay-Only Patch For An Existing 2026.6.11 Runtime
+
+Use this only when `/root/openclaw-runtime-2026.6.11-erp` is already a 2026.6.11 runtime and you only need the small LINE burst overlay. Do not use this path to upgrade a 2026.6.8 runtime for `ollama-cloud`.
+
+```bash
+cd /root
+RUNTIME=/root/openclaw-runtime-2026.6.11-erp
 OVERLAY=/root/openclaw-runtime-2026.6.11-erp-line-burst-fe432925.tgz
 SHA="a26156d0440b4d6010d89c98a94cdefa8f0d51693762874bde0d607175f94a99"
+
+node "$RUNTIME/dist/index.js" --version | grep 'OpenClaw 2026.6.11' \
+  || { echo "base runtime is not 2026.6.11; use full runtime install instead"; exit 1; }
 
 curl -fL -o "$OVERLAY" \
   https://raw.githubusercontent.com/bosocmputer/openclaw-runtime-artifacts/main/releases/2026.6.11-erp-20260706-line-burst-fastpath/openclaw-runtime-2026.6.11-erp-line-burst-fe432925.tgz
 
-if [ ! -d "$RUNTIME" ] && [ -d "$OLD_RUNTIME" ]; then
-  cp -a "$OLD_RUNTIME" "$RUNTIME"
-fi
-
-test -d "$RUNTIME/dist" || { echo "missing $RUNTIME"; exit 1; }
 echo "$SHA  $OVERLAY" | sha256sum -c -
 
 BACKUP_ID=$(date +%Y%m%d%H%M%S)
@@ -118,21 +189,11 @@ cp -a "$RUNTIME/ui/src/app-navigation.ts" /root/openclaw-backups/$BACKUP_ID/app-
 cp -a /root/start-openclaw-gateway.sh /root/openclaw-backups/$BACKUP_ID/start-openclaw-gateway.sh 2>/dev/null || true
 
 tar -xzf "$OVERLAY" -C "$RUNTIME"
-
-node "$RUNTIME/dist/index.js" --version || true
 grep -R "textWindowMs.*0\\|line_burst_preflight\\|line_delivery_attempt" -n "$RUNTIME/dist" | head -30
-ps -ef | grep -E "openclaw-runtime-2026.6.11-erp|openclaw.*gateway" | grep -v grep || true
 pm2 restart openclaw-gateway --update-env
 pm2 restart openclaw-api --update-env
 pm2 save
-ss -ltnp | grep 18789 || true
 ```
-
-Expected verification:
-
-- Process uses `/root/openclaw-runtime-2026.6.11-erp/dist/index.js`
-- Marker grep shows `line_burst_preflight` and `line_delivery_attempt`
-- `--version` may show `OpenClaw 2026.6.8` on legacy skeleton upgrades; this is acceptable if markers and smoke tests pass
 
 ### Smoke Test Current Release
 

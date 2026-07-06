@@ -20,6 +20,13 @@ Runbook นี้ใช้กับ customer/server layout ปัจจุบั
 | openclaw-api | `b32f1f0` or newer on `main` | Provider/model, memory, analysis, health, media support |
 | openclaw-admin | `adba0bb` or newer on `main` | Current Admin UX and docs |
 
+Runtime gate:
+
+- Production gateway should run a real 2026.6.11 runtime built from `bosocmputer/openclaw` branch `codex/openclaw-2026.6.11-erp-line-burst`.
+- `node /root/openclaw-runtime-2026.6.11-erp/dist/index.js --version` should print `OpenClaw 2026.6.11 (fe43292)` or newer.
+- Overlay-only installs are acceptable only on an already-correct 2026.6.11 base runtime, or as a legacy LINE-only emergency patch.
+- If `ollama-cloud` or another newer provider is enabled, `/model` runtime test must report `runtimeVersion: OpenClaw 2026.6.11 (fe43292)` or newer.
+
 Release behavior to watch:
 
 - LINE image + quick follow-up text should be grouped into one turn. `/monitor` should show the latest turn; structured `line_burst_*` markers are useful but not the sole release gate.
@@ -214,7 +221,7 @@ Marker ที่คาดหวัง:
 
 - ตรวจว่า gateway process ใช้ `/root/openclaw-runtime-2026.6.11-erp/dist/index.js`
 - ตรวจ overlay markers: `grep -R "textWindowMs.*0\\|line_burst_preflight\\|line_delivery_attempt" -n /root/openclaw-runtime-2026.6.11-erp/dist | head -30`
-- `node ... --version` อาจยังแสดง `OpenClaw 2026.6.8` ถ้า upgrade จาก skeleton เดิม ให้ใช้ markers + smoke test เป็น release gate
+- ถ้า `node ... --version` ยังแสดง `OpenClaw 2026.6.8` แปลว่ายังไม่ใช่ full 2026.6.11 runtime. ใช้ได้เฉพาะ legacy LINE-only emergency patch; ถ้าเปิด `ollama-cloud` หรือ provider ใหม่ให้ติดตั้ง full runtime 2026.6.11 ก่อน
 - ตรวจว่า API/Admin อัปเดตแล้ว และ `/monitor` แสดง turn ล่าสุด
 
 Kill switch เฉพาะ LINE coalescing:

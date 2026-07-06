@@ -100,6 +100,16 @@ test('materializeProviderCatalogsForRefs writes OpenRouter image metadata for ga
 test('materializeProviderCatalogsForRefs writes Ollama Cloud runtime config without raw key', async () => {
   const config = {
     env: { OLLAMA_API_KEY: 'ol-secret-value' },
+    models: {
+      providers: {
+        'ollama-cloud': {
+          baseUrl: 'https://ollama.com/v1',
+          baseURL: 'https://ai.ollama.com',
+          api: 'openai-completions',
+          models: [],
+        },
+      },
+    },
     agents: { defaults: { model: { primary: 'ollama-cloud/gemini-3-flash-preview', fallbacks: [] } }, list: [] },
   }
 
@@ -121,6 +131,7 @@ test('materializeProviderCatalogsForRefs writes Ollama Cloud runtime config with
   assert.equal(result.changed, true)
   const provider = result.config.models.providers['ollama-cloud']
   assert.equal(provider.baseUrl, 'https://ollama.com')
+  assert.equal(provider.baseURL, undefined)
   assert.equal(provider.api, 'ollama')
   assert.deepEqual(provider.apiKey, { source: 'env', provider: 'default', id: 'OLLAMA_API_KEY' })
   assert.deepEqual(provider.models.map(model => model.id), ['gemini-3-flash-preview', 'gemma4:31b'])

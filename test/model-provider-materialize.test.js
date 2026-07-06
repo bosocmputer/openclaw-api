@@ -97,6 +97,36 @@ test('materializeProviderCatalogsForRefs writes OpenRouter image metadata for ga
   assert.equal(JSON.stringify(provider).includes('or-secret-value'), false)
 })
 
+test('materializeProviderCatalogsForRefs writes Ollama Cloud native config without raw key', async () => {
+  const config = {
+    env: { OLLAMA_API_KEY: 'ol-secret-value' },
+    agents: { defaults: { model: { primary: 'ollama-cloud/gemini-3-flash-preview', fallbacks: [] } }, list: [] },
+  }
+
+  const result = await materializeProviderCatalogsForRefs(config, ['ollama-cloud/gemini-3-flash-preview'], {
+    getModelCatalog: async () => providerCatalog('ollama-cloud', [
+      {
+        id: 'gemini-3-flash-preview',
+        name: 'gemini-3-flash-preview',
+        capabilities: { inputModalities: ['text'] },
+      },
+      {
+        id: 'gemma4:31b',
+        name: 'gemma4:31b',
+        capabilities: { inputModalities: ['text'] },
+      },
+    ]),
+  })
+
+  assert.equal(result.changed, true)
+  const provider = result.config.models.providers['ollama-cloud']
+  assert.equal(provider.baseUrl, 'https://ollama.com')
+  assert.equal(provider.api, 'ollama')
+  assert.deepEqual(provider.apiKey, { source: 'env', provider: 'default', id: 'OLLAMA_API_KEY' })
+  assert.deepEqual(provider.models.map(model => model.id), ['gemini-3-flash-preview', 'gemma4:31b'])
+  assert.equal(JSON.stringify(provider).includes('ol-secret-value'), false)
+})
+
 test('materializeProviderCatalogsForRefs refreshes stale OpenRouter text-only metadata for image tests', async () => {
   let catalogCalls = 0
   const config = {

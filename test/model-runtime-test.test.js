@@ -154,6 +154,28 @@ test('runtime model test maps OpenClaw unknown model errors to model_not_found',
   assert.match(result.safeMessage, /runtime/)
 })
 
+test('runtime model test maps unsupported Ollama Cloud provider to clear runtime message', async () => {
+  clearModelRuntimeTestCache()
+  const spawnImpl = spawnFor(args => {
+    if (args.includes('--version')) return { stdout: 'OpenClaw 2026.6.8 (test)\n' }
+    return {
+      code: 1,
+      stderr: 'Unknown provider: ollama-cloud',
+    }
+  })
+
+  const result = await runModelRuntimeTest({
+    model: 'ollama-cloud/gemini-3-flash-preview',
+    capability: 'text',
+    config: { env: { OLLAMA_API_KEY: 'ol-test' } },
+    spawnImpl,
+  })
+
+  assert.equal(result.ok, false)
+  assert.equal(result.status, 'runtime_unavailable')
+  assert.match(result.safeMessage, /Ollama Cloud/)
+})
+
 test('runtime model test maps unsupported image attachments to not_image_capable', async () => {
   clearModelRuntimeTestCache()
   const spawnImpl = spawnFor(args => {

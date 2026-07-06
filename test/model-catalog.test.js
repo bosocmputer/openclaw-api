@@ -222,3 +222,48 @@ test('kilo catalog with key still warns that runtime verification is required', 
   assert.equal(result.warnings.length, 1)
   assert.match(result.warnings[0], /runtime verification/)
 })
+
+test('ollama cloud catalog uses hosted ids exactly and sends bearer auth', async () => {
+  clearModelCatalogCache()
+  let capturedUrl = ''
+  let capturedHeaders = null
+  const result = await getModelCatalog({
+    provider: 'ollama-cloud',
+    config: { env: { OLLAMA_API_KEY: 'ol-test' } },
+    fetchImpl: async (url, opts) => {
+      capturedUrl = url
+      capturedHeaders = opts.headers
+      return response({
+        body: {
+          models: [
+            { name: 'gemini-3-flash-preview', model: 'gemini-3-flash-preview', modified_at: '2026-01-01T00:00:00Z' },
+            { name: 'gemma4:31b', model: 'gemma4:31b' },
+          ],
+        },
+      })
+    },
+  })
+
+  assert.equal(capturedUrl, 'https://ollama.com/api/tags')
+  assert.equal(capturedHeaders.Authorization, 'Bearer ol-test')
+  assert.equal(result.status, 'ready')
+  assert.deepEqual(result.models.map(model => model.id), ['gemini-3-flash-preview', 'gemma4:31b'])
+  assert.equal(result.models.some(model => /:cloud|-cloud/.test(model.id)), false)
+  assert.deepEqual(result.models[0].capabilities.inputModalities, ['text'])
+})
+
+test('ollama cloud catalog requires key before provider call', async () => {
+  clearModelCatalogCache()
+  let calls = 0
+  const result = await getModelCatalog({
+    provider: 'ollama-cloud',
+    config: { env: {} },
+    fetchImpl: async () => {
+      calls += 1
+      return response()
+    },
+  })
+
+  assert.equal(result.status, 'missing_key')
+  assert.equal(calls, 0)
+})

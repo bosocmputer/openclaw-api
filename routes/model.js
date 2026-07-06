@@ -627,6 +627,9 @@ router.post('/models/test', async (req, res) => {
   const { provider, apiKey } = req.body || {}
   try {
     let url, headers = {}
+    if (!String(apiKey || '').trim()) {
+      return res.json({ ok: false, status: 400, error: 'Missing API key' })
+    }
 
     if (provider === 'openrouter') {
       url = 'https://openrouter.ai/api/v1/models'
@@ -657,6 +660,9 @@ router.post('/models/test', async (req, res) => {
       headers = { 'Authorization': `Bearer ${apiKey}` }
     } else if (provider === 'kilocode') {
       url = 'https://api.kilo.ai/api/gateway/models'
+      headers = { 'Authorization': `Bearer ${apiKey}` }
+    } else if (provider === 'ollama-cloud') {
+      url = 'https://ollama.com/api/tags'
       headers = { 'Authorization': `Bearer ${apiKey}` }
     } else {
       return res.status(400).json({ ok: false, error: 'Unknown provider' })

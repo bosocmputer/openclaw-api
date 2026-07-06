@@ -120,8 +120,8 @@ test('materializeProviderCatalogsForRefs writes Ollama Cloud runtime config with
 
   assert.equal(result.changed, true)
   const provider = result.config.models.providers['ollama-cloud']
-  assert.equal(provider.baseUrl, 'https://ollama.com/v1')
-  assert.equal(provider.api, 'openai-completions')
+  assert.equal(provider.baseUrl, 'https://ollama.com')
+  assert.equal(provider.api, 'ollama')
   assert.deepEqual(provider.apiKey, { source: 'env', provider: 'default', id: 'OLLAMA_API_KEY' })
   assert.deepEqual(provider.models.map(model => model.id), ['gemini-3-flash-preview', 'gemma4:31b'])
   assert.equal(JSON.stringify(provider).includes('ol-secret-value'), false)

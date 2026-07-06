@@ -149,6 +149,16 @@ router.get('/status', async (req, res) => {
           deletedCount: autoSummary[agent.id]?.deletedCount || 0,
           estimatedInjectedChars: autoSummary[agent.id]?.estimatedInjectedChars || 0,
           maxContextChars: autoSummary[agent.id]?.maxContextChars || 1200,
+          memoryHealth: autoSummary[agent.id]?.memoryHealth || {
+            noiseCount: 0,
+            duplicateCount: 0,
+            dynamicFactCount: 0,
+            vagueTeachingCount: 0,
+            overBudget: false,
+            injectedChars: 0,
+            activeButNotInjectedCount: 0,
+            totalActiveChars: 0,
+          },
         },
       }
     })
@@ -261,6 +271,17 @@ router.post('/policies/:agentId/apply-auto-learn', requirePg, async (req, res) =
       actor: adminActor(req) || 'admin',
       limit: req.body?.limit || 200,
     }))
+  } catch (err) {
+    safeError(res, err)
+  }
+})
+
+// POST /api/memory/maintenance/cleanup
+router.post('/maintenance/cleanup', requirePg, async (req, res) => {
+  try {
+    const body = req.body || {}
+    const agentId = body.agentId || body.agent_id || req.query.agentId || req.query.agent_id
+    res.json(await memoryAuto.cleanupMemories(agentId, body, adminActor(req) || 'admin'))
   } catch (err) {
     safeError(res, err)
   }

@@ -121,14 +121,15 @@ test('safe auto promotes only policy-safe observations and blocks high risk', ()
     risk: 'low',
     recommendedAction: 'observe',
     evidence: {},
-  }, policy), true)
+  }, policy), false)
 
   assert.equal(memoryAuto._internal.canAutoPromoteObservation({
     status: 'observed',
-    type: 'staff_instruction',
+    type: 'terminology',
     risk: 'medium',
     recommendedAction: 'policy_promote',
     evidence: { source: 'explicit_chat_teaching' },
+    summary: 'ลูกค้ากลุ่มนี้มักใช้คำย่อ ABC สำหรับบริการนี้',
   }, policy), true)
 
   assert.equal(memoryAuto._internal.canAutoPromoteObservation({
@@ -146,6 +147,67 @@ test('safe auto promotes only policy-safe observations and blocks high risk', ()
     recommendedAction: 'block_truth',
     evidence: {},
   }, policy), true)
+})
+
+test('safe auto never promotes issue/log/media observations', () => {
+  const policy = {
+    mode: 'safe_auto',
+    safeTypes: ['terminology', 'workflow_hint', 'entity_alias'],
+    allowChatTeaching: true,
+  }
+  const issueObservation = memoryAuto._internal.issueToObservation({
+    id: 'turn-refine',
+    agentId: 'sale',
+    userText: 'ถามกว้าง ๆ',
+  }, {
+    tag: 'needs_user_refine',
+    label: 'Needs user refine',
+    reviewTarget: 'user ambiguity',
+    evidence: { userPreview: 'ถามกว้าง ๆ' },
+  })
+
+  assert.equal(issueObservation.recommendedAction, 'manual_review')
+  assert.equal(memoryAuto._internal.canAutoPromoteObservation(issueObservation, policy), false)
+  assert.equal(memoryAuto._internal.canAutoPromoteObservation({
+    status: 'observed',
+    type: 'workflow_hint',
+    risk: 'low',
+    recommendedAction: 'manual_review',
+    evidence: { source: 'media_workflow' },
+    summary: '[User sent media without caption]',
+  }, policy), false)
+})
+
+test('vague explicit teaching is review-only and dynamic facts stay blocked', () => {
+  const vague = memoryAuto._internal.explicitTeachingObservation({
+    id: 'turn-vague',
+    agentId: 'sale',
+    userText: 'จำไว้ว่า ตัวนี้ใช้เป็นเบอร์นี้',
+  })
+  assert.ok(vague)
+  assert.equal(vague.type, 'staff_instruction')
+  assert.equal(vague.recommendedAction, 'manual_review')
+  assert.equal(memoryAuto._internal.canAutoPromoteObservation(vague, {
+    mode: 'safe_auto',
+    safeTypes: ['staff_instruction'],
+    allowChatTeaching: true,
+  }), false)
+
+  const dynamic = memoryAuto._internal.classifyMemoryText('จำไว้ว่าลูกค้าคนนี้ได้ราคาพิเศษเสมอ', { source: 'explicit_chat_teaching', promotable: true })
+  assert.equal(dynamic.decision, 'blocked_dynamic_fact')
+  assert.equal(dynamic.safeToPromote, false)
+})
+
+test('runtime memory selection respects max context chars and priority', () => {
+  const selection = memoryAuto._internal.selectRuntimeMemoryLines([
+    { id: 'low', status: 'active', type: 'workflow_hint', content: 'ตอบให้สุภาพและถามเพิ่มเมื่อข้อมูลไม่พอ', confidence: 0.8, updatedAt: '2026-01-01T00:00:00Z' },
+    { id: 'term', status: 'active', type: 'terminology', content: 'คำว่า ABC หมายถึงชื่อเรียกเดียวกับ Alpha Beta', confidence: 0.9, updatedAt: '2026-01-02T00:00:00Z' },
+    { id: 'blocked', status: 'blocked', type: 'blocked_fact', content: 'ราคา 100 บาท', confidence: 0.9, updatedAt: '2026-01-03T00:00:00Z' },
+  ], 90)
+
+  assert.ok(selection.chars <= 90)
+  assert.ok(selection.includedMemoryIds.includes('term'))
+  assert.equal(selection.includedMemoryIds.includes('blocked'), false)
 })
 
 test('auto learned block is replaced without touching other memory sections', () => {

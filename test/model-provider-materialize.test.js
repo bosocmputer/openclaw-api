@@ -138,6 +138,41 @@ test('materializeProviderCatalogsForRefs writes Ollama Cloud runtime config with
   assert.equal(JSON.stringify(provider).includes('ol-secret-value'), false)
 })
 
+test('materializeProviderCatalogsForRefs repairs stale Ollama Cloud endpoint without refetching catalog', async () => {
+  let catalogCalls = 0
+  const config = {
+    env: { OLLAMA_API_KEY: 'ol-secret-value' },
+    models: {
+      providers: {
+        'ollama-cloud': {
+          baseUrl: 'https://ollama.com/v1',
+          baseURL: 'https://ai.ollama.com',
+          api: 'openai-completions',
+          apiKey: { source: 'env', provider: 'default', id: 'OLLAMA_API_KEY' },
+          models: [
+            { id: 'gemini-3-flash-preview', name: 'Gemini', input: ['text'] },
+          ],
+        },
+      },
+    },
+  }
+
+  const result = await materializeProviderCatalogsForRefs(config, ['ollama-cloud/gemini-3-flash-preview'], {
+    getModelCatalog: async () => {
+      catalogCalls += 1
+      return providerCatalog('ollama-cloud', [])
+    },
+  })
+
+  assert.equal(result.changed, true)
+  assert.equal(catalogCalls, 0)
+  const provider = result.config.models.providers['ollama-cloud']
+  assert.equal(provider.baseUrl, 'https://ollama.com')
+  assert.equal(provider.baseURL, undefined)
+  assert.equal(provider.api, 'ollama')
+  assert.deepEqual(provider.models.map(model => model.id), ['gemini-3-flash-preview'])
+})
+
 test('materializeProviderCatalogsForRefs refreshes stale OpenRouter text-only metadata for image tests', async () => {
   let catalogCalls = 0
   const config = {

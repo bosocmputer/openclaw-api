@@ -12,13 +12,13 @@ Runbook นี้ใช้กับ customer/server layout ปัจจุบั
 
 ## Current Release Status
 
-| Component | Expected version / commit | Notes |
+| Component | Expected release / commit | Notes |
 | --------- | ------------------------- | ----- |
-| Runtime | `OpenClaw 2026.6.11` + ERP overlay | Generic LINE image/text coalescing and text-only fast path |
+| Runtime overlay release | `2026.6.11-erp-20260706-line-burst-fastpath` | Generic LINE image/text coalescing and text-only fast path |
 | Runtime overlay SHA256 | `a26156d0440b4d6010d89c98a94cdefa8f0d51693762874bde0d607175f94a99` | Verify before install |
 | Runtime overlay commits | `f608a18664`, `9976b9bbd7`, `fe432925eb` | sidebar export fix, LINE media burst, no delay for standalone text |
-| openclaw-api | `3166394` or newer on `main` | Provider/model, memory, analysis, health, media support |
-| openclaw-admin | `a767392` or newer on `main` | Current Admin UX and docs |
+| openclaw-api | `b32f1f0` or newer on `main` | Provider/model, memory, analysis, health, media support |
+| openclaw-admin | `adba0bb` or newer on `main` | Current Admin UX and docs |
 
 Release behavior to watch:
 
@@ -212,8 +212,9 @@ Marker ที่คาดหวัง:
 
 ถ้าไม่มี marker และ behavior ไม่ผ่าน:
 
-- ตรวจ runtime version: `node /root/openclaw-runtime-2026.6.11-erp/dist/index.js --version`
 - ตรวจว่า gateway process ใช้ `/root/openclaw-runtime-2026.6.11-erp/dist/index.js`
+- ตรวจ overlay markers: `grep -R "textWindowMs.*0\\|line_burst_preflight\\|line_delivery_attempt" -n /root/openclaw-runtime-2026.6.11-erp/dist | head -30`
+- `node ... --version` อาจยังแสดง `OpenClaw 2026.6.8` ถ้า upgrade จาก skeleton เดิม ให้ใช้ markers + smoke test เป็น release gate
 - ตรวจว่า API/Admin อัปเดตแล้ว และ `/monitor` แสดง turn ล่าสุด
 
 Kill switch เฉพาะ LINE coalescing:

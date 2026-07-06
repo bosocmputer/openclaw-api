@@ -5,15 +5,17 @@
 
 ## Current Release Baseline
 
-- OpenClaw runtime baseline: `OpenClaw 2026.6.11`
+- OpenClaw runtime overlay release: `2026.6.11-erp-20260706-line-burst-fastpath`
 - Runtime overlay: `openclaw-runtime-2026.6.11-erp-line-burst-fe432925.tgz`
 - Runtime overlay SHA256: `a26156d0440b4d6010d89c98a94cdefa8f0d51693762874bde0d607175f94a99`
 - Runtime overlay source commits: `f608a18664`, `9976b9bbd7`, `fe432925eb`
-- `openclaw-api` minimum feature commit: `3166394`
-- `openclaw-admin` minimum feature commit: `a767392`
+- `openclaw-api` minimum feature commit: `b32f1f0`
+- `openclaw-admin` minimum feature commit: `adba0bb`
 - MCP image: `ghcr.io/smlsoft/smlmcpconnect:latest` with `search_product` Smart Search v2
 
 The exact API/Admin commits inside a generated artifact are recorded in `release-manifest.json` when an artifact package is used. For the current customer flow, API/Admin are usually updated by `git pull --ff-only`, while the runtime is updated by applying the small overlay tarball to the pinned 2026.6.11 runtime directory.
+
+Runtime version note: customer servers upgraded from the older ERP skeleton may still print `OpenClaw 2026.6.8` from `node ... --version` after applying this overlay. That alone is not a failure. The release gate is checksum + gateway path + overlay markers + LINE/Telegram smoke tests.
 
 Important runtime behavior:
 
@@ -67,7 +69,7 @@ docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}' || tr
 
 ## 0. Recommended Customer Update Path For 2026-07-06 Overlay
 
-Use this path when the customer server already has git checkouts at `/root/openclaw-api` and `/root/openclaw-admin`, and has a base runtime directory at `/root/openclaw-runtime-2026.6.11-erp`. It matches the current Chang168 rollout style.
+Use this path when the customer server already has git checkouts at `/root/openclaw-api` and `/root/openclaw-admin`, and has an existing runtime skeleton. If `/root/openclaw-runtime-2026.6.11-erp` is missing but `/root/openclaw-runtime-2026.6.8-erp` exists, copy the old skeleton into the new target path before applying the overlay. It matches the current Chang168 rollout style.
 
 ### Update API and Admin
 
@@ -94,13 +96,18 @@ docker compose up -d --build openclaw-admin
 ```bash
 cd /root
 RUNTIME=/root/openclaw-runtime-2026.6.11-erp
+OLD_RUNTIME=/root/openclaw-runtime-2026.6.8-erp
 OVERLAY=/root/openclaw-runtime-2026.6.11-erp-line-burst-fe432925.tgz
 SHA="a26156d0440b4d6010d89c98a94cdefa8f0d51693762874bde0d607175f94a99"
 
 curl -fL -o "$OVERLAY" \
   https://raw.githubusercontent.com/bosocmputer/openclaw-runtime-artifacts/main/releases/2026.6.11-erp-20260706-line-burst-fastpath/openclaw-runtime-2026.6.11-erp-line-burst-fe432925.tgz
 
-test -d "$RUNTIME/dist"
+if [ ! -d "$RUNTIME" ] && [ -d "$OLD_RUNTIME" ]; then
+  cp -a "$OLD_RUNTIME" "$RUNTIME"
+fi
+
+test -d "$RUNTIME/dist" || { echo "missing $RUNTIME"; exit 1; }
 echo "$SHA  $OVERLAY" | sha256sum -c -
 
 BACKUP_ID=$(date +%Y%m%d%H%M%S)
@@ -112,7 +119,8 @@ cp -a /root/start-openclaw-gateway.sh /root/openclaw-backups/$BACKUP_ID/start-op
 
 tar -xzf "$OVERLAY" -C "$RUNTIME"
 
-node "$RUNTIME/dist/index.js" --version
+node "$RUNTIME/dist/index.js" --version || true
+grep -R "textWindowMs.*0\\|line_burst_preflight\\|line_delivery_attempt" -n "$RUNTIME/dist" | head -30
 ps -ef | grep -E "openclaw-runtime-2026.6.11-erp|openclaw.*gateway" | grep -v grep || true
 pm2 restart openclaw-gateway --update-env
 pm2 restart openclaw-api --update-env
@@ -120,11 +128,11 @@ pm2 save
 ss -ltnp | grep 18789 || true
 ```
 
-Expected version:
+Expected verification:
 
-```text
-OpenClaw 2026.6.11
-```
+- Process uses `/root/openclaw-runtime-2026.6.11-erp/dist/index.js`
+- Marker grep shows `line_burst_preflight` and `line_delivery_attempt`
+- `--version` may show `OpenClaw 2026.6.8` on legacy skeleton upgrades; this is acceptable if markers and smoke tests pass
 
 ### Smoke Test Current Release
 

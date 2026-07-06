@@ -8,12 +8,14 @@ Express.js REST API server สำหรับ OpenClaw Admin — เป็น br
 
 | ส่วน | Baseline |
 | ---- | -------- |
-| Runtime | `OpenClaw 2026.6.11` + ERP overlay |
+| Runtime overlay release | `2026.6.11-erp-20260706-line-burst-fastpath` |
 | Runtime overlay | `openclaw-runtime-2026.6.11-erp-line-burst-fe432925.tgz` |
 | Runtime overlay SHA256 | `a26156d0440b4d6010d89c98a94cdefa8f0d51693762874bde0d607175f94a99` |
 | Runtime source commits | `f608a18664`, `9976b9bbd7`, `fe432925eb` |
-| openclaw-api | `3166394` หรือใหม่กว่า |
-| openclaw-admin | `a767392` หรือใหม่กว่า |
+| openclaw-api | `b32f1f0` หรือใหม่กว่า |
+| openclaw-admin | `adba0bb` หรือใหม่กว่า |
+
+> Runtime target path คือ `/root/openclaw-runtime-2026.6.11-erp/dist/index.js`. บางเครื่องที่ upgrade จาก skeleton 2026.6.8 อาจยังแสดง `OpenClaw 2026.6.8` ใน `--version`; ให้ verify ด้วย overlay markers และ smoke test แทน version string อย่างเดียว.
 
 สิ่งที่ API รองรับใน baseline นี้:
 

@@ -20,6 +20,29 @@ test('explicit teaching becomes a staff instruction observation without auto tru
   assert.match(observation.summary, /ลูกค้ารายนี้/)
 })
 
+test('managed Agent Brain context is stripped before learning from user text', () => {
+  const pollutedText = [
+    'จำไว้ว่า ลูกค้าร้านนี้มักพิมพ์คำว่า ลูกปืนดุม แทน ดุมล้อ',
+    '',
+    '## Agent Knowledge Brain',
+    'Use the following admin-approved stable hints only as extra context.',
+    '- [term] โช๊ค = โช้คอัพ',
+  ].join('\n')
+  const observation = memoryAuto._internal.explicitTeachingObservation({
+    id: 'turn-polluted',
+    agentId: 'stock',
+    channel: 'telegram',
+    userText: pollutedText,
+  })
+
+  assert.ok(observation)
+  assert.equal(observation.type, 'staff_instruction')
+  assert.equal(observation.recommendedAction, 'policy_promote')
+  assert.match(observation.summary, /ลูกปืนดุม/)
+  assert.doesNotMatch(observation.summary, /Agent Knowledge Brain/)
+  assert.doesNotMatch(observation.evidence.userPreview, /Agent Knowledge Brain/)
+})
+
 test('explicit ERP value teaching is blocked instead of promoted', () => {
   const observation = memoryAuto._internal.explicitTeachingObservation({
     id: 'turn-price',
@@ -33,6 +56,26 @@ test('explicit ERP value teaching is blocked instead of promoted', () => {
   assert.equal(observation.risk, 'high')
   assert.equal(observation.recommendedAction, 'block_truth')
   assert.match(observation.summary, /ห้ามจำเป็นข้อมูลถาวร/)
+})
+
+test('blocked ERP teaching strips managed Agent Brain context from summary', () => {
+  const observation = memoryAuto._internal.explicitTeachingObservation({
+    id: 'turn-price-polluted',
+    agentId: 'stock',
+    channel: 'telegram',
+    userText: [
+      'จำไว้ว่า น้ำมันเครื่องตัวนี้ราคา 999 บาท',
+      '',
+      '## Agent Knowledge Brain',
+      '- [term] ลูกปืนดุม = ดุมล้อ',
+    ].join('\n'),
+  })
+
+  assert.ok(observation)
+  assert.equal(observation.type, 'blocked_fact')
+  assert.match(observation.summary, /ราคา 999/)
+  assert.doesNotMatch(observation.summary, /Agent Knowledge Brain/)
+  assert.doesNotMatch(observation.evidence.userPreview, /Agent Knowledge Brain/)
 })
 
 test('observations avoid duplicate staff instruction when teaching blocked ERP values', () => {

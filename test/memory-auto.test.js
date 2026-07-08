@@ -43,6 +43,21 @@ test('managed Agent Brain context is stripped before learning from user text', (
   assert.doesNotMatch(observation.evidence.userPreview, /Agent Knowledge Brain/)
 })
 
+test('inline-code wrapped teaching strips the teaching prefix before promotion', () => {
+  const observation = memoryAuto._internal.explicitTeachingObservation({
+    id: 'turn-inline-code',
+    agentId: 'stock',
+    channel: 'telegram',
+    userText: '`จำไว้ว่า ลูกค้ามักพิมพ์คำว่า ปั๊มน้ำ แทน ปั้มน้ำ`',
+  })
+
+  assert.ok(observation)
+  assert.equal(observation.type, 'staff_instruction')
+  assert.equal(observation.recommendedAction, 'policy_promote')
+  assert.equal(observation.summary, 'ลูกค้ามักพิมพ์คำว่า ปั๊มน้ำ แทน ปั้มน้ำ')
+  assert.doesNotMatch(observation.evidence.userPreview, /`/)
+})
+
 test('explicit ERP value teaching is blocked instead of promoted', () => {
   const observation = memoryAuto._internal.explicitTeachingObservation({
     id: 'turn-price',

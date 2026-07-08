@@ -22,7 +22,7 @@ Express.js REST API server สำหรับ OpenClaw Admin — เป็น br
 - LINE image + rapid follow-up text works as one generic turn in runtime; text-only LINE messages are not delayed.
 - Parse LINE/runtime/media markers when available and expose safe monitor/analysis metadata without leaking local paths or tokens.
 - Model admin supports runtime-verified text/image tests and provider catalog flow, including OpenRouter, Kilo, and `ollama-cloud`.
-- Auto-Learn hardening is default-deny: dynamic ERP facts such as price, stock, cost, availability, credit, and substitute products must come from MCP/SML tools, not memory.
+- Agent Knowledge Brain is default-deny and evidence-based: typed `terminology`, `search_hint`, `description_suggestion`, workflow/FAQ hints, and blocked facts are stored in PostgreSQL. Dynamic ERP facts such as price, stock, cost, availability, credit, and substitute products must come from MCP/SML tools, not Brain memory.
 - ใช้ `OPENCLAW_BIN=/root/openclaw-runtime-2026.6.11-erp/dist/index.js` เพื่อให้ model/image tests เรียก runtime ตัวเดียวกับ gateway จริง
 
 ## ทำหน้าที่อะไร
@@ -315,7 +315,7 @@ openclaw-api/
 > checkpoint files อยู่ที่ `~/.openclaw/agents/<agentId>/sessions/<sessionId>.jsonl.reset.<ts>`
 > สร้างอัตโนมัติเมื่อ gateway ทำ compaction
 
-### Memory & Dreams (ต้องการ OpenClaw v2026.4.5+)
+### Agent Knowledge Brain / Memory & Dreams (ต้องการ OpenClaw v2026.4.5+)
 
 | Method | Path | Description |
 | ------ | ---- | ----------- |
@@ -323,10 +323,19 @@ openclaw-api/
 | GET | `/api/memory/:agentId/memory` | เนื้อหา MEMORY.md เต็มของ agent |
 | GET | `/api/memory/:agentId/dreams` | เนื้อหา dreams.md เต็มของ agent |
 | GET | `/api/memory/:agentId/daily/:filename` | เนื้อหา daily memory file เช่น `2026-04-07-session.md` |
+| POST | `/api/agent-brain/evaluate-turn` | ประเมิน turn แบบ fail-open: คืน memory context ที่ relevant, search hints, description suggestions และ decision evidence |
+| GET | `/api/agent-brain/items` | รายการ Agent Brain items typed เช่น `terminology`, `search_hint`, `description_suggestion`, `blocked_fact` |
+| PATCH | `/api/agent-brain/items/:id` | แก้ไข status/type/content ของ Agent Brain item |
+| DELETE | `/api/agent-brain/items/:id` | ลบ item และสร้าง tombstone กัน relearn ซ้ำ |
+| POST | `/api/agent-brain/items/:id/block-relearn` | block item และกัน relearn ซ้ำ |
+| GET/PUT | `/api/agent-brain/policies/:agentId` | policy ต่อ agent: off/observe_only/safe_auto/manual_review, context budget, chat teaching |
+| GET/PUT | `/api/agent-brain/channel-policies/:channel/:accountId` | policy ต่อ LINE/Telegram/Webchat account: audience customer/staff/internal และ SML description suggestion visibility |
 
 > `memory/*.md` อยู่ที่ `~/.openclaw/workspace-<agentId>/memory/` — เป็นสถานะ memory เดิม/เสริม ไม่ใช่สิทธิ์ tool หรือ source of truth ของ SOUL template
 >
-> `MEMORY.md` อยู่ที่ `~/.openclaw/workspace-<agentId>/MEMORY.md` — main session เท่านั้น
+> `MEMORY.md` อยู่ที่ `~/.openclaw/workspace-<agentId>/MEMORY.md` — main session เท่านั้น. API จะ sync เฉพาะ Agent Brain active memory ที่ปลอดภัยและไม่เกิน budget เข้า managed block เพื่อให้ OpenClaw runtime ใช้ผ่าน memory-core เดิม. Runtime รุ่นที่มี Agent Brain hook สามารถเรียก `/api/agent-brain/evaluate-turn` แบบ fail-open ก่อนตอบได้เมื่อเปิด `AGENT_BRAIN_ENABLED=1`.
+>
+> `search_hint` ช่วยตั้งคำค้นแต่ต้อง verify ด้วย MCP/Search ทุกครั้ง. `description_suggestion` เป็นคำแนะนำให้ staff เติมช่อง `description` ใน SML ERP และไม่ถูก inject เป็น runtime truth.
 >
 > `dreams.md` อยู่ที่ `~/.openclaw/workspace-<agentId>/dreams.md`
 >
@@ -365,6 +374,7 @@ Authorization: Bearer <API_TOKEN>
 - **Webchat → LINE bug** — ถ้า `agent:<id>:main` session มี `lastChannel=line` ค้างอยู่ gateway จะ reply ออก LINE แทน webchat — ดูวิธีแก้ใน INSTALL.md
 - **PostgreSQL constraint** — `admin_users_role_check` รองรับ role: `superadmin`, `admin`, `chat`
 - **SOUL.md template** — AI ใช้ native MCP tools ที่ register ใน `openclaw.json mcp.servers`; template สร้างจาก live MCP `/tools` ตาม `mcp-access-mode` พร้อม `OPENCLAW_SOUL_CONTRACT`; template ไม่สั่ง `curl`, `/call`, `exec tool`, `mcporter`, หรือ memory/write-tool block
+- **Agent Brain** — เป็น helper/context ไม่ใช่ source of truth. ราคา สต็อก ต้นทุน availability เครดิต ราคาพิเศษ และสินค้าทดแทนต้องมาจาก MCP/SML เสมอ. Channel audience default เป็น `customer` และปิด SML description suggestions.
 - **`/api/memory/status`** — คืน `dailyMemory` field พร้อม `fileCount`, `totalChars`, `latestDate`, `files[]` — ใช้ดูไฟล์ memory เดิม/เสริม ไม่ใช่ contract สิทธิ์ MCP
 - **`/api/monitor/events`** — อ่าน `.jsonl` files last 50 lines ต่อ session, `ts` field = UTC (ต้อง +7h บน client เพื่อแสดงเวลาไทย)
 - **LINE webhookPath ต้องไม่ซ้ำกัน** — ถ้า 2 OA ใช้ path เดียวกัน OA แรกได้ 401

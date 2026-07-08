@@ -198,6 +198,54 @@ test('vague explicit teaching is review-only and dynamic facts stay blocked', ()
   assert.equal(dynamic.safeToPromote, false)
 })
 
+test('explicit search teaching becomes search hint candidate, not generic truth', () => {
+  const observation = memoryAuto._internal.explicitTeachingObservation({
+    id: 'turn-search-hint',
+    agentId: 'sale',
+    channel: 'line',
+    userText: 'จำไว้ว่า C010113-0318 ใช้กับผ้าเบรคหน้า',
+  })
+
+  assert.ok(observation)
+  assert.equal(observation.type, 'search_hint')
+  assert.equal(observation.recommendedAction, 'search_hint_candidate')
+  assert.equal(observation.evidence.productCodes[0], 'C010113-0318')
+  assert.equal(memoryAuto._internal.canAutoPromoteObservation(observation, {
+    mode: 'safe_auto',
+    safeTypes: ['search_hint'],
+    allowChatTeaching: true,
+  }), false)
+})
+
+test('description suggestions are generated from product code plus terms but not runtime context', () => {
+  const observation = memoryAuto._internal.descriptionSuggestionObservation({
+    id: 'turn-desc',
+    agentId: 'sale',
+    channel: 'line',
+    userText: 'C010113-0318 ผ้าเบรคหน้า',
+    finalText: 'ผ้าเบรคหน้า รหัส C010113-0318 ราคา 750 บาท',
+  })
+
+  assert.ok(observation)
+  assert.equal(observation.type, 'description_suggestion')
+  assert.equal(observation.recommendedAction, 'description_suggestion')
+  assert.equal(observation.evidence.productCodes[0], 'C010113-0318')
+
+  const selected = memoryAuto._internal.selectRuntimeMemoryLines([
+    { id: 'desc', status: 'active', type: 'description_suggestion', content: observation.summary, confidence: 0.8 },
+    { id: 'term', status: 'active', type: 'terminology', content: 'เบรค = เบรก', confidence: 0.8 },
+  ], 500)
+  assert.equal(selected.includedMemoryIds.includes('desc'), false)
+  assert.equal(selected.includedMemoryIds.includes('term'), true)
+})
+
+test('channel and audience validators protect customer channels from SML suggestions', () => {
+  assert.equal(memoryAuto._internal.normalizeChannel('line'), 'line')
+  assert.equal(memoryAuto._internal.normalizeAudience('internal'), 'internal')
+  assert.throws(() => memoryAuto._internal.normalizeChannel('sms'), /channel is invalid/)
+  assert.throws(() => memoryAuto._internal.normalizeAudience('public'), /audience is invalid/)
+})
+
 test('runtime memory selection respects max context chars and priority', () => {
   const selection = memoryAuto._internal.selectRuntimeMemoryLines([
     { id: 'low', status: 'active', type: 'workflow_hint', content: 'ตอบให้สุภาพและถามเพิ่มเมื่อข้อมูลไม่พอ', confidence: 0.8, updatedAt: '2026-01-01T00:00:00Z' },

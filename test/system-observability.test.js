@@ -33,5 +33,10 @@ test('gateway process runtime matcher checks PM2 command shape', () => {
 test('customer update command runs release gate as POST', () => {
   const command = observability.buildCustomerUpdateCommand().command
   assert.match(command, /OPENCLAW_BIN=\/root\/openclaw-runtime-2026\.6\.11-erp\/dist\/index\.js/)
+  assert.match(command, /TARGET_RUNTIME_BRANCH=codex\/openclaw-2026\.6\.11-erp-line-burst/)
+  assert.match(command, /git clone --depth 1 --branch "\$TARGET_RUNTIME_BRANCH" https:\/\/github\.com\/bosocmputer\/openclaw\.git "\$NEW_RUNTIME"/)
+  assert.match(command, /pnpm build:docker/)
+  assert.match(command, /cat > \/root\/start-openclaw-gateway\.sh/)
+  assert.match(command, /pm2 start \/root\/start-openclaw-gateway\.sh --name openclaw-gateway/)
   assert.match(command, /curl -fsS -X POST .*\/api\/system\/release-gate\/run/)
 })

@@ -146,7 +146,7 @@ Production readiness gate:
 
 - Preferred UI: Admin `/system` → `Production Readiness` → `Run Release Gate`
 - The gate checks runtime version, `OPENCLAW_BIN`, PM2 gateway process path, API process, PostgreSQL, and oversized legacy `MEMORY.md`
-- Use `Copy Customer Update Command` from the same panel when updating customer servers through AnyDesk
+- Use `Copy Customer Update Command` from the same panel when updating customer servers through AnyDesk; the generated command updates API/Admin, installs or refreshes the target runtime when missing or stale, recreates the gateway PM2 entry, and runs this gate at the end
 
 CLI equivalent:
 

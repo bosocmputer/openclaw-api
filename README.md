@@ -109,7 +109,7 @@ node index.js
 
 ## อัปเดต
 
-แนะนำให้เปิด Admin `/system` แล้วใช้ **Production Readiness → Copy Customer Update Command** เป็น source of truth สำหรับคำสั่งลูกค้า เพราะ command นี้จะตั้ง `OPENCLAW_BIN`, restart service และ run release gate ให้ท้ายคำสั่ง
+แนะนำให้เปิด Admin `/system` แล้วใช้ **Production Readiness → Copy Customer Update Command** เป็น source of truth สำหรับคำสั่งลูกค้า เพราะ command นี้จะ update API/Admin, install หรือ refresh runtime `2026.6.11` เมื่อยังไม่มี, ตั้ง `OPENCLAW_BIN`, recreate gateway PM2 script, restart service และ run release gate ให้ท้ายคำสั่ง
 
 Current customer flow:
 

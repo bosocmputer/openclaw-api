@@ -10,6 +10,7 @@ const { buildLatencyFromGatewayLog } = require('../lib/monitor-latency')
 const { buildLineDeliveryTelemetry } = require('../lib/line-delivery-telemetry')
 const { getModelReadinessForConfig } = require('../lib/model-readiness')
 const runtimeGuardrailLib = require('../lib/runtime-guardrails')
+const systemObservability = require('../lib/system-observability')
 const businessProfiles = require('../lib/business-profiles')
 const { NATIVE_MEDIA_CONTRACT_ID } = require('../lib/soul-template')
 const {
@@ -22,7 +23,7 @@ const {
 
 const HEALTH_TTL_MS = 30_000
 const EXTERNAL_TIMEOUT_MS = 1800
-const TARGET_OPENCLAW_VERSION = '2026.6.8'
+const TARGET_OPENCLAW_VERSION = systemObservability.TARGET_RUNTIME_VERSION
 const MIN_NODE_VERSION = '22.19.0'
 const TELEGRAM_BINDING_ACKS_PATH = path.join(HOME, '.openclaw/admin-state/telegram-binding-intent-acks.json')
 let healthCache = null
@@ -1323,6 +1324,45 @@ router.get('/health', async (req, res) => {
   }
 })
 
+router.get('/observability', async (req, res) => {
+  try {
+    const refresh = req.query.refresh === 'true'
+    res.json(redact(await systemObservability.getObservability({ refresh })))
+  } catch (e) {
+    res.status(200).json({
+      ok: false,
+      generatedAt: nowIso(),
+      error: sanitizeError(e),
+    })
+  }
+})
+
+router.post('/release-gate/run', async (req, res) => {
+  try {
+    res.json(redact(await systemObservability.runReleaseGate()))
+  } catch (e) {
+    res.status(200).json({
+      ok: false,
+      status: 'fail',
+      generatedAt: nowIso(),
+      safeMessage: 'Release gate failed to run',
+      error: sanitizeError(e),
+    })
+  }
+})
+
+router.get('/update-command', async (req, res) => {
+  try {
+    res.json(redact(systemObservability.buildCustomerUpdateCommand()))
+  } catch (e) {
+    res.status(200).json({
+      ok: false,
+      generatedAt: nowIso(),
+      error: sanitizeError(e),
+    })
+  }
+})
+
 router.post('/telegram-binding-intent/ack', async (req, res) => {
   try {
     const accountId = String(req.body?.accountId || '').trim()
@@ -1402,11 +1442,13 @@ router.get('/support-bundle', async (req, res) => {
     } catch {}
 
     const latency = buildLatencyFromGatewayLog({ minutes: 60, maxLines: 2500, maxBytes: 1024 * 1024 })
+    const observability = await systemObservability.getObservability({ refresh: true }).catch(e => ({ ok: false, error: sanitizeError(e) }))
 
     res.json(redact({
       generatedAt: nowIso(),
       durationMs: durationSince(startedAt),
       health,
+      observability,
       releaseState: releaseState(),
       recentToolLoopWarnings: recentToolLoopWarnings(readOpenclawConfig()),
       latencySummary: latency.summary,

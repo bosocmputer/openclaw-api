@@ -19,6 +19,7 @@ Express.js REST API server สำหรับ OpenClaw Admin — เป็น br
 
 สิ่งที่ API รองรับใน baseline นี้:
 
+- `/api/system/observability`, `/api/system/release-gate/run`, และ `/api/system/update-command` เป็น production gate สำหรับตรวจ runtime/process/git/memory ก่อน update ลูกค้า โดยไม่ยิง model provider ตอนเปิดหน้า
 - LINE image + rapid follow-up text works as one generic turn in runtime; text-only LINE messages are not delayed.
 - Parse LINE/runtime/media markers when available and expose safe monitor/analysis metadata without leaking local paths or tokens.
 - Model admin supports runtime-verified text/image tests and provider catalog flow, including OpenRouter, Kilo, and `ollama-cloud`.
@@ -108,6 +109,8 @@ node index.js
 
 ## อัปเดต
 
+แนะนำให้เปิด Admin `/system` แล้วใช้ **Production Readiness → Copy Customer Update Command** เป็น source of truth สำหรับคำสั่งลูกค้า เพราะ command นี้จะตั้ง `OPENCLAW_BIN`, restart service และ run release gate ให้ท้ายคำสั่ง
+
 Current customer flow:
 
 ```bash
@@ -184,6 +187,9 @@ openclaw-api/
 | ------ | ---- | ----------- |
 | GET | `/api/status` | gateway online/offline |
 | GET | `/api/system/health?refresh=false` | bounded cached system health |
+| GET | `/api/system/observability?refresh=false` | read-only release/runtime/process/memory snapshot |
+| POST | `/api/system/release-gate/run` | release gate: runtime version, OPENCLAW_BIN, gateway process path, PostgreSQL, legacy memory |
+| GET | `/api/system/update-command` | redacted customer update command for current target runtime |
 | GET | `/api/system/support-bundle` | redacted support bundle |
 | GET | `/api/monitor/latency?minutes=60&channel=telegram` | bounded Telegram latency timeline |
 | GET | `/api/config` | อ่าน openclaw.json |

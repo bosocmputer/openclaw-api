@@ -142,6 +142,23 @@ cd ~/openclaw-api
 bash scripts/update-server.sh --health-only
 ```
 
+Production readiness gate:
+
+- Preferred UI: Admin `/system` → `Production Readiness` → `Run Release Gate`
+- The gate checks runtime version, `OPENCLAW_BIN`, PM2 gateway process path, API process, PostgreSQL, and oversized legacy `MEMORY.md`
+- Use `Copy Customer Update Command` from the same panel when updating customer servers through AnyDesk
+
+CLI equivalent:
+
+```bash
+API_TOKEN=$(grep -E '^API_TOKEN=' ~/openclaw-api/.env | tail -1 | cut -d= -f2- | tr -d '"')
+curl -fsS -X POST "http://127.0.0.1:4000/api/system/release-gate/run" \
+  -H "Authorization: Bearer $API_TOKEN" \
+  | python3 -m json.tool
+```
+
+If `service.gateway` warns, do not rely on `node ... --version` alone. Confirm PM2 is actually running `/root/openclaw-runtime-2026.6.11-erp/dist/index.js`.
+
 Critical fail ต้องเป็น `0`:
 
 ```bash

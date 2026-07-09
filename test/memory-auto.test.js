@@ -164,6 +164,7 @@ test('memory enum validators reject invalid values', () => {
   assert.throws(() => memoryAuto._internal.normalizeMemoryType('price_truth'), /type is invalid/)
   assert.throws(() => memoryAuto._internal.normalizeMemoryScope('customer-server'), /scope is invalid/)
   assert.throws(() => memoryAuto._internal.normalizePolicyMode('auto-everything'), /mode is invalid/)
+  assert.throws(() => memoryAuto._internal.normalizeLegacyMemoryMode('append_forever'), /legacyMemoryMode is invalid/)
 })
 
 test('safe auto promotes only policy-safe observations and blocks high risk', () => {
@@ -334,4 +335,38 @@ test('auto learned block is replaced without touching other memory sections', ()
   assert.match(next, /\[term\] โช๊ค = โช้คอัพ/)
   assert.doesNotMatch(next, /- old/)
   assert.match(next, /## Manual Notes\n- keep me/)
+})
+
+test('managed-only legacy memory mode strips unmanaged notes before sync', () => {
+  const current = [
+    '# Long-Term Memory',
+    '',
+    '- stale manual fact that should not be injected forever',
+    '',
+    '<!-- OPENCLAW_AUTO_LEARN_MEMORY_START -->',
+    '- old',
+    '<!-- OPENCLAW_AUTO_LEARN_MEMORY_END -->',
+    '',
+  ].join('\n')
+
+  const base = memoryAuto._internal.legacyMemoryBaseContent(current, { legacyMemoryMode: 'managed_only' })
+  const next = memoryAuto._internal.replaceAutoMemoryBlock(base, ['- [term] ลูกค้าพิมพ์คำว่า ABC แทน Alpha Beta'])
+
+  assert.doesNotMatch(next, /stale manual fact/)
+  assert.match(next, /Auto-Learned Business Memory/)
+  assert.match(next, /ABC แทน Alpha Beta/)
+})
+
+test('full legacy memory mode preserves unmanaged notes for compatibility', () => {
+  const current = [
+    '# Long-Term Memory',
+    '',
+    '- manually curated note',
+  ].join('\n')
+
+  const base = memoryAuto._internal.legacyMemoryBaseContent(current, { legacyMemoryMode: 'full' })
+  const next = memoryAuto._internal.replaceAutoMemoryBlock(base, ['- [term] stable hint'])
+
+  assert.match(next, /manually curated note/)
+  assert.match(next, /stable hint/)
 })

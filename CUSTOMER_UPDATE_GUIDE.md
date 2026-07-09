@@ -162,6 +162,20 @@ Expected verification:
 - Marker grep shows `line_burst_preflight` and `line_delivery_attempt`
 - `node ... --version` prints `OpenClaw 2026.6.11 (fe43292)` or newer
 - `/model` runtime test for `ollama-cloud/...` passes with `runtimeVersion: OpenClaw 2026.6.11 (fe43292)` when Ollama Cloud is enabled
+- Admin `/system` → `Production Readiness` → `Run Release Gate` returns `ok` or only reviewed warnings
+
+CLI release gate:
+
+```bash
+cd /root/openclaw-api
+TOKEN=$(grep -E '^API_TOKEN=' .env | cut -d= -f2-)
+curl -fsS -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  "http://127.0.0.1:4000/api/system/release-gate/run" \
+  | python3 -m json.tool
+```
+
+If the gate warns that gateway PM2 does not point to runtime 2026.6.11, recreate/restart `openclaw-gateway` with `/root/start-openclaw-gateway.sh` before testing models.
 
 ### Overlay-Only Patch For An Existing 2026.6.11 Runtime
 

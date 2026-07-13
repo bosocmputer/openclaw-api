@@ -12,6 +12,7 @@ const { getModelReadinessForConfig } = require('../lib/model-readiness')
 const runtimeGuardrailLib = require('../lib/runtime-guardrails')
 const systemObservability = require('../lib/system-observability')
 const businessProfiles = require('../lib/business-profiles')
+const memoryAuto = require('../lib/memory-auto')
 const { NATIVE_MEDIA_CONTRACT_ID } = require('../lib/soul-template')
 const {
   DEFAULT_MCP_URL,
@@ -27,6 +28,7 @@ const TARGET_OPENCLAW_VERSION = systemObservability.TARGET_RUNTIME_VERSION
 const MIN_NODE_VERSION = '22.19.0'
 const TELEGRAM_BINDING_ACKS_PATH = path.join(HOME, '.openclaw/admin-state/telegram-binding-intent-acks.json')
 let healthCache = null
+let brainHealthConsecutiveFailures = 0
 
 function nowIso() {
   return new Date().toISOString()
@@ -1233,6 +1235,63 @@ async function buildHealth() {
 
   checks.push(await lineWebhookStatus(config))
   checks.push(lineTelemetryStatus(config))
+
+  const brainStart = Date.now()
+  if (!memoryAuto.isAvailable()) {
+    checks.push(makeCheck(
+      'agent.brain.v3',
+      'Agent Brain v3',
+      'info',
+      'info',
+      'PostgreSQL is not configured; Agent Brain is unavailable but channel/MCP flow is unaffected',
+      brainStart,
+      { remediation: 'Configure PostgreSQL before enabling Agent Brain observation or injection' }
+    ))
+  } else {
+    try {
+      const brain = await memoryAuto.getAgentBrainHealth()
+      brainHealthConsecutiveFailures = 0
+      const schemaMismatch = Number(brain.contractVersion || 0) !== 2
+      const activeCount = Number(brain.memory?.activeCount || 0)
+      checks.push(makeCheck(
+        'agent.brain.v3',
+        'Agent Brain v3',
+        schemaMismatch ? 'warn' : activeCount > 0 ? 'ok' : 'info',
+        schemaMismatch ? 'warn' : 'info',
+        schemaMismatch
+          ? `Evidence contract mismatch: expected v2, received v${brain.contractVersion || 'unknown'}`
+          : activeCount > 0
+            ? `${activeCount} active knowledge item(s); ${brain.memory.activeUsedCount || 0} used in real turns`
+            : 'Brain is safe but no knowledge has passed verification yet',
+        brainStart,
+        {
+          details: {
+            featureFlags: brain.featureFlags,
+            observations: brain.observations,
+            usage: brain.usage,
+          },
+          remediation: schemaMismatch ? 'Deploy matching API/runtime Evidence Contract v2 before enabling injection' : undefined,
+        }
+      ))
+    } catch (error) {
+      brainHealthConsecutiveFailures += 1
+      const persistent = brainHealthConsecutiveFailures >= 3
+      checks.push(makeCheck(
+        'agent.brain.v3',
+        'Agent Brain v3',
+        persistent ? 'warn' : 'info',
+        persistent ? 'warn' : 'info',
+        persistent
+          ? `Brain health failed ${brainHealthConsecutiveFailures} consecutive times`
+          : 'Brain health is temporarily unavailable; MCP and channel flow remain available',
+        brainStart,
+        {
+          details: { safeError: sanitizeError(error), consecutiveFailures: brainHealthConsecutiveFailures },
+          remediation: persistent ? 'Open /memory and verify PostgreSQL/schema health; keep injection disabled until recovered' : undefined,
+        }
+      ))
+    }
+  }
 
   const telemetryStart = Date.now()
   try {

@@ -32,6 +32,18 @@ Important runtime behavior:
 - Telegram must not show `↪️ Model Fallback...` to end users.
 - `/monitor` should show recovered fallback turns as `model_timeout_recovered`, not a hard failure.
 - `/model` should validate primary, fallback, and image understanding models before save.
+- Agent Brain V3 uses Evidence Contract V2. Runtime sends separated user utterance, media descriptions, structured tool events, and assistant outcome; raw LINE/Telegram identifiers are HMAC pseudonyms.
+- Brain rollout is layered. Start with `AGENT_BRAIN_V2_ENABLED=1`, while `AGENT_BRAIN_INJECTION_ENABLED=0` and `AGENT_BRAIN_AUTO_PROMOTE_ENABLED=0`. Enable the latter two only after reclassify dry-run and shadow evidence are reviewed.
+
+Recommended initial Brain flags in `/root/openclaw-api/.env`:
+
+```bash
+AGENT_BRAIN_V2_ENABLED=1
+AGENT_BRAIN_INJECTION_ENABLED=0
+AGENT_BRAIN_AUTO_PROMOTE_ENABLED=0
+```
+
+The gateway environment should additionally include `AGENT_BRAIN_ENABLED=1`, the same API URL/token used by the Admin API, and a stable secret `AGENT_BRAIN_SUBJECT_HASH_KEY`. Never rotate the HMAC key during an active evaluation window unless losing contact-scope continuity is intentional.
 
 ## Server Layouts Supported
 

@@ -25,6 +25,28 @@ test('conversation history redacts secrets in text and payloads', () => {
   assert.equal(payload.nested.ok, true)
 })
 
+test('conversation exports pseudonymize channel identifiers and redact VIN, plate, and local paths', () => {
+  const lineId = `U${'a'.repeat(32)}`
+  const text = history._internal.redactExportText(
+    `[LINE user:${lineId}] VIN: JTDBR32E720012345 ทะเบียน: กข 1234 path=/root/.openclaw/media/inbound/photo.jpg`,
+  )
+  assert.doesNotMatch(text, new RegExp(lineId, 'i'))
+  assert.match(text, /\[subject:[a-f0-9]{10}\]/)
+  assert.match(text, /\[redacted-vin\]/)
+  assert.match(text, /\[redacted-plate\]/)
+  assert.match(text, /\[redacted-path\]/)
+
+  const turn = history._internal.sanitizeTurnForExport({
+    id: `agent:sale:line:direct:${lineId}:turn-1`,
+    sessionKey: `agent:sale:line:direct:${lineId}`,
+    chatUser: lineId,
+    userText: 'hello',
+  })
+  assert.match(turn.id, /^\[turn:[a-f0-9]{10}\]$/)
+  assert.match(turn.sessionKey, /^\[session:[a-f0-9]{10}\]$/)
+  assert.match(turn.chatUser, /^\[subject:[a-f0-9]{10}\]$/)
+})
+
 test('conversation turn normalization creates bounded event timeline', () => {
   const normalized = history._internal.normalizeTurn({
     id: 'turn-1',

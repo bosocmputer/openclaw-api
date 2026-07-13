@@ -168,6 +168,8 @@ test('memory enum validators reject invalid values', () => {
 })
 
 test('safe auto promotes only policy-safe observations and blocks high risk', () => {
+  const previousFlag = process.env.AGENT_BRAIN_AUTO_PROMOTE_ENABLED
+  process.env.AGENT_BRAIN_AUTO_PROMOTE_ENABLED = '1'
   const policy = {
     mode: 'safe_auto',
     safeTypes: ['terminology', 'workflow_hint', 'entity_alias'],
@@ -206,6 +208,8 @@ test('safe auto promotes only policy-safe observations and blocks high risk', ()
     recommendedAction: 'block_truth',
     evidence: {},
   }, policy), true)
+  if (previousFlag === undefined) delete process.env.AGENT_BRAIN_AUTO_PROMOTE_ENABLED
+  else process.env.AGENT_BRAIN_AUTO_PROMOTE_ENABLED = previousFlag
 })
 
 test('safe auto never promotes issue/log/media observations', () => {
@@ -276,19 +280,39 @@ test('explicit search teaching becomes search hint candidate, not generic truth'
   }), false)
 })
 
-test('description suggestions are generated from product code plus terms but not runtime context', () => {
+test('description suggestions require verified search_product.v2 evidence and ignore assistant text', () => {
+  const unsafe = memoryAuto._internal.descriptionSuggestionObservation({
+    id: 'turn-desc-unsafe',
+    agentId: 'sale',
+    channel: 'line',
+    userText: 'ผ้าเบรคหน้า รุ่นหนึ่ง',
+    finalText: 'รหัส C010113-0318 ราคา 750 บาท',
+  })
+  assert.equal(unsafe, null)
+
   const observation = memoryAuto._internal.descriptionSuggestionObservation({
     id: 'turn-desc',
     agentId: 'sale',
     channel: 'line',
-    userText: 'C010113-0318 ผ้าเบรคหน้า',
+    userText: 'ผ้าเบรคหน้า รุ่นหนึ่ง',
     finalText: 'ผ้าเบรคหน้า รหัส C010113-0318 ราคา 750 บาท',
+    toolEvents: [
+      {
+        toolName: 'search_product',
+        result: { schema_version: 'search_product.v2', status: 'not_found', keyword: 'ผ้าเบรคหน้า รุ่นหนึ่ง', selected: null, candidates: [] },
+      },
+      {
+        toolName: 'search_product',
+        result: { schema_version: 'search_product.v2', status: 'resolved', keyword: 'C010113-0318', selected: { code: 'C010113-0318' }, candidates: [] },
+      },
+    ],
   })
 
   assert.ok(observation)
   assert.equal(observation.type, 'description_suggestion')
   assert.equal(observation.recommendedAction, 'description_suggestion')
   assert.equal(observation.evidence.productCodes[0], 'C010113-0318')
+  assert.doesNotMatch(observation.summary, /750/)
 
   const selected = memoryAuto._internal.selectRuntimeMemoryLines([
     { id: 'desc', status: 'active', type: 'description_suggestion', content: observation.summary, confidence: 0.8 },
@@ -303,6 +327,83 @@ test('channel and audience validators protect customer channels from SML suggest
   assert.equal(memoryAuto._internal.normalizeAudience('internal'), 'internal')
   assert.throws(() => memoryAuto._internal.normalizeChannel('sms'), /channel is invalid/)
   assert.throws(() => memoryAuto._internal.normalizeAudience('public'), /audience is invalid/)
+})
+
+test('v2 user utterance strips channel envelopes and media descriptions', () => {
+  const utterance = memoryAuto._internal.normalizeUserUtterance([
+    '[LINE user:U14f8674f7688e236428f4ec79c9118bb Tue 2026-07-07 11:53 GMT+7] (sender):',
+    '[Image]',
+    'User text:',
+    'มีสินค้านี้ไหม',
+    'Description:',
+    'A photographed package with serial numbers',
+  ].join('\n'))
+  assert.equal(utterance, 'มีสินค้านี้ไหม')
+})
+
+test('generic entity validation rejects channel ids dates VINs and local paths', () => {
+  for (const value of [
+    'U14f8674f7688e236428f4ec79c9118bb',
+    '2026-07-07',
+    '2019-2024',
+    '1HGCM82633A004352',
+    '/root/.openclaw/media/inbound/image.jpg',
+  ]) {
+    assert.equal(memoryAuto._internal.isUnsafeEntityIdentifier(value), true, value)
+    assert.equal(memoryAuto._internal.normalizeEntityCode(value), null, value)
+  }
+  assert.equal(memoryAuto._internal.normalizeEntityCode('C010113-0318'), 'C010113-0318')
+})
+
+test('search_product.v2 adapter trusts only structured selected codes', () => {
+  const verified = memoryAuto._internal.adaptSearchProductV2ToolEvent({
+    status: 'ok',
+    result: {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          schema_version: 'search_product.v2',
+          status: 'resolved',
+          keyword: 'generic search phrase',
+          selected: { code: 'SKU-1001' },
+          candidates: [{ code: 'SKU-1001' }],
+        }),
+      }],
+    },
+  })
+  assert.equal(verified.verified, true)
+  assert.equal(verified.selectedCode, 'SKU-1001')
+
+  const unknown = memoryAuto._internal.adaptSearchProductV2ToolEvent({
+    result: { status: 'resolved', selected: { code: 'SKU-1001' } },
+  })
+  assert.equal(unknown.verified, false)
+})
+
+test('customer teaching stays contact scoped while staff teaching is agent scoped', () => {
+  const customer = memoryAuto._internal.explicitTeachingObservation({
+    id: 'turn-customer',
+    agentId: 'general',
+    userText: 'จำไว้ว่า ฉันชอบคำตอบแบบสั้น',
+    sourceAuthority: 'customer',
+    subjectHash: 'a'.repeat(64),
+    contractVersion: 2,
+  })
+  assert.equal(customer.scope, 'contact')
+  assert.equal(customer.type, 'preference')
+  assert.equal(customer.recommendedAction, 'contact_soft_promote')
+
+  const staff = memoryAuto._internal.explicitTeachingObservation({
+    id: 'turn-staff',
+    agentId: 'general',
+    userText: 'จำไว้ว่า ให้สรุปผลเป็นข้อ',
+    sourceAuthority: 'staff',
+    subjectHash: 'b'.repeat(64),
+    contractVersion: 2,
+  })
+  assert.equal(staff.scope, 'agent')
+  assert.equal(staff.type, 'staff_instruction')
+  assert.equal(staff.recommendedAction, 'policy_promote')
 })
 
 test('runtime memory selection respects max context chars and priority', () => {

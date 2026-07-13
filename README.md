@@ -329,19 +329,23 @@ openclaw-api/
 | GET | `/api/memory/:agentId/memory` | เนื้อหา MEMORY.md เต็มของ agent |
 | GET | `/api/memory/:agentId/dreams` | เนื้อหา dreams.md เต็มของ agent |
 | GET | `/api/memory/:agentId/daily/:filename` | เนื้อหา daily memory file เช่น `2026-04-07-session.md` |
-| POST | `/api/agent-brain/evaluate-turn` | ประเมิน turn แบบ fail-open: คืน memory context ที่ relevant, search hints, description suggestions และ decision evidence |
+| POST | `/api/agent-brain/evaluate-turn` | Evidence Contract V2: `pre_turn` คืน bounded context/lookupId และ `post_turn` รับ structured tool evidence แบบ fail-open |
 | GET | `/api/agent-brain/items` | รายการ Agent Brain items typed เช่น `terminology`, `search_hint`, `description_suggestion`, `blocked_fact` |
 | PATCH | `/api/agent-brain/items/:id` | แก้ไข status/type/content ของ Agent Brain item |
 | DELETE | `/api/agent-brain/items/:id` | ลบ item และสร้าง tombstone กัน relearn ซ้ำ |
 | POST | `/api/agent-brain/items/:id/block-relearn` | block item และกัน relearn ซ้ำ |
 | GET/PUT | `/api/agent-brain/policies/:agentId` | policy ต่อ agent: off/observe_only/safe_auto/manual_review, context budget, chat teaching |
 | GET/PUT | `/api/agent-brain/channel-policies/:channel/:accountId` | policy ต่อ LINE/Telegram/Webchat account: audience customer/staff/internal และ SML description suggestion visibility |
+| GET | `/api/agent-brain/health` | สถานะ V2, active/used, invalid evidence, conflict, lookup p95, timeout และ injected chars |
+| POST | `/api/agent-brain/maintenance/reclassify` | preview/apply การจัดประเภทข้อมูลเดิมใหม่; `dryRun=true` เป็นค่าเริ่มต้น |
 
 > `memory/*.md` อยู่ที่ `~/.openclaw/workspace-<agentId>/memory/` — เป็นสถานะ memory เดิม/เสริม ไม่ใช่สิทธิ์ tool หรือ source of truth ของ SOUL template
 >
-> `MEMORY.md` อยู่ที่ `~/.openclaw/workspace-<agentId>/MEMORY.md` — main session เท่านั้น. API จะ sync เฉพาะ Agent Brain active memory ที่ปลอดภัยและไม่เกิน budget เข้า managed block เพื่อให้ OpenClaw runtime ใช้ผ่าน memory-core เดิม. Runtime รุ่นที่มี Agent Brain hook สามารถเรียก `/api/agent-brain/evaluate-turn` แบบ fail-open ก่อนตอบได้เมื่อเปิด `AGENT_BRAIN_ENABLED=1`.
+> `MEMORY.md` อยู่ที่ `~/.openclaw/workspace-<agentId>/MEMORY.md` — main session เท่านั้น. Structured Brain ใน PostgreSQL เป็น source of truth; ไฟล์นี้เป็น compatibility snapshot ที่มี bounded managed block.
 >
 > `search_hint` ช่วยตั้งคำค้นแต่ต้อง verify ด้วย MCP/Search ทุกครั้ง. `description_suggestion` เป็นคำแนะนำให้ staff เติมช่อง `description` ใน SML ERP และไม่ถูก inject เป็น runtime truth.
+>
+> Production flags แยกชั้น: `AGENT_BRAIN_V2_ENABLED=1` เก็บ evidence, `AGENT_BRAIN_INJECTION_ENABLED=1` ใช้ verified context และ `AGENT_BRAIN_AUTO_PROMOTE_ENABLED=1` เปิด promotion ตาม policy. ค่า default ของ injection/auto-promote เป็นปิด. Runtime hook เปิดด้วย `AGENT_BRAIN_ENABLED=1`, timeout เริ่มต้น 700ms และ fail-open.
 >
 > `dreams.md` อยู่ที่ `~/.openclaw/workspace-<agentId>/dreams.md`
 >

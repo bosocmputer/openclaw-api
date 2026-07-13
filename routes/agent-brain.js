@@ -24,6 +24,24 @@ router.post('/evaluate-turn', requirePg, async (req, res) => {
   }
 })
 
+// GET /api/agent-brain/health
+router.get('/health', requirePg, async (req, res) => {
+  try {
+    res.json(await memoryAuto.getAgentBrainHealth({ agentId: req.query.agentId }))
+  } catch (err) {
+    safeError(res, err)
+  }
+})
+
+// POST /api/agent-brain/maintenance/reclassify (dry-run by default)
+router.post('/maintenance/reclassify', requirePg, async (req, res) => {
+  try {
+    res.json(await memoryAuto.reclassifyAgentBrain(req.body || {}, adminActor(req) || 'admin'))
+  } catch (err) {
+    safeError(res, err)
+  }
+})
+
 // GET /api/agent-brain/items
 router.get('/items', requirePg, async (req, res) => {
   try {

@@ -206,6 +206,29 @@ test('usage metrics normalize provider token and cost shapes', () => {
   assert.equal(_internal.normalizeUsageMetrics({ input: 0, output: 0, total: 0 }), null)
 })
 
+test('image tool telemetry exposes the runtime model and usage without estimating price', () => {
+  const telemetry = _internal.toolResultTelemetry({
+    role: 'toolResult',
+    toolName: 'image',
+    details: {
+      model: 'openrouter/google/gemini-3.8-flash',
+      usage: {
+        input: 320,
+        output: 12,
+        totalTokens: 332,
+        cost: { total: 0.000285 },
+      },
+    },
+  })
+
+  assert.deepEqual(telemetry, {
+    model: 'openrouter/google/gemini-3.8-flash',
+    provider: 'openrouter',
+    modelSource: 'actual',
+    usage: { input: 320, output: 12, totalTokens: 332, cost: 0.000285 },
+  })
+})
+
 test('model metadata reports actual model or configured fallback source', () => {
   assert.deepEqual(
     _internal.messageModelMetadata(

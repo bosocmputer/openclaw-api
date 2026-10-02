@@ -482,6 +482,20 @@ function normalizeUsageMetrics(usage) {
   return { input, output, totalTokens, cost: totalCost }
 }
 
+function toolResultTelemetry(msg) {
+  const details = msg?.details
+  if (!details || typeof details !== 'object') return null
+  const model = typeof details.model === 'string' ? details.model.trim() : ''
+  const usage = normalizeUsageMetrics(details.usage)
+  if (!model && !usage) return null
+  return {
+    model: model || null,
+    provider: model ? providerFromModelRef(model) : null,
+    modelSource: model ? 'actual' : null,
+    ...(usage ? { usage } : {}),
+  }
+}
+
 function providerFromModelRef(ref) {
   const raw = String(ref || '')
   const slash = raw.indexOf('/')
@@ -1001,6 +1015,9 @@ function normalizeSessionEntry(entry) {
       mediaType: entry.message.mediaType ?? entry.mediaType,
       mediaTypes: entry.message.mediaTypes ?? entry.mediaTypes,
       usage: entry.message.usage ?? entry.usage,
+      toolName: entry.message.toolName,
+      toolCallId: entry.message.toolCallId,
+      details: entry.message.details,
       api: entry.message.api,
       provider: entry.message.provider,
       model: entry.message.model,
@@ -1477,7 +1494,9 @@ router.get('/events', async (req, res) => {
         let sessionInputTokens = 0
         let sessionOutputTokens = 0
         for (const msg of filtered) {
-          const usageMetrics = normalizeUsageMetrics(msg.usage)
+          const usageMetrics = msg.role === 'toolResult'
+            ? toolResultTelemetry(msg)?.usage || null
+            : normalizeUsageMetrics(msg.usage)
           if (usageMetrics) {
             sessionInputTokens += usageMetrics.input
             sessionOutputTokens += usageMetrics.output
@@ -1628,22 +1647,31 @@ router.get('/events', async (req, res) => {
           } else if (msg.role === 'toolResult') {
             // Pair tool result with last unmatched tool event
             const text = extractToolResultText(msg)
+            const telemetry = toolResultTelemetry(msg)
             const missingTool = parseToolNotFound(text)
             if (missingTool) {
               toolNotFoundCounts[missingTool] = (toolNotFoundCounts[missingTool] || 0) + 1
             }
-            if (text) {
-              let paired = false
-              for (let i = events.length - 1; i >= 0; i--) {
-                if (events[i].type === 'tool' && events[i].toolResult === undefined) {
-                  events[i].toolResult = text.slice(0, 3000)
-                  paired = true
-                  break
+            let paired = false
+            for (let i = events.length - 1; i >= 0; i--) {
+              if (events[i].type === 'tool' && events[i].toolResult === undefined) {
+                if (text) events[i].toolResult = text.slice(0, 3000)
+                if (telemetry?.model) {
+                  events[i].model = telemetry.model
+                  events[i].provider = telemetry.provider
+                  events[i].modelSource = telemetry.modelSource
                 }
+                if (telemetry?.usage) {
+                  events[i].inputTokens = telemetry.usage.input
+                  events[i].outputTokens = telemetry.usage.output
+                  events[i].cost = telemetry.usage.cost
+                }
+                paired = true
+                break
               }
-              if (missingTool && !paired) {
-                events.push({ ...msgTime, ts: tsFormatted, type: 'warning', text: `Tool ${missingTool} not found`, ...toolEventFields(missingTool), toolResult: text.slice(0, 3000) })
-              }
+            }
+            if (missingTool && !paired) {
+              events.push({ ...msgTime, ts: tsFormatted, type: 'warning', text: `Tool ${missingTool} not found`, ...toolEventFields(missingTool), toolResult: text.slice(0, 3000) })
             }
           }
         }
@@ -2009,9 +2037,12 @@ function buildMonitorCost(days = 30) {
         for (const line of lines) {
           try {
             const entry = JSON.parse(line)
-            if (entry.message?.role !== 'assistant') continue
-            if (isDeliveryMirrorMessage(entry.message)) continue
-            const usageMetrics = normalizeUsageMetrics(entry.message?.usage ?? entry.usage)
+            const msg = normalizeSessionEntry(entry)
+            if (!msg || (msg.role !== 'assistant' && msg.role !== 'toolResult')) continue
+            if (isDeliveryMirrorMessage(msg)) continue
+            const usageMetrics = msg.role === 'toolResult'
+              ? toolResultTelemetry(msg)?.usage || null
+              : normalizeUsageMetrics(msg.usage)
             if (!usageMetrics) continue
             const ts = entry.timestamp
             if (!ts || new Date(ts) < cutoff) continue
@@ -2086,6 +2117,7 @@ module.exports = {
     extractToolResultText,
     messageModelMetadata,
     normalizeUsageMetrics,
+    toolResultTelemetry,
     normalizeTrajectoryEntries,
     buildConversationTurnsFromSession,
     buildConversationTurnsFromGatewayLog,

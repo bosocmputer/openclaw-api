@@ -256,6 +256,78 @@ test('materializeSelectedProviderCatalogs collects default and agent model refs'
   )
 })
 
+test('materializeSelectedProviderCatalogs prunes stale OpenRouter catalog models that are not selected', async () => {
+  const config = {
+    models: {
+      providers: {
+        openrouter: {
+          baseUrl: 'https://openrouter.ai/api/v1',
+          api: 'openai-completions',
+          models: [
+            { id: 'stealth/space-bunny-alpha', name: 'Space Bunny', input: ['text'] },
+            { id: 'google/gemini-3.8-flash', name: 'Gemini', input: ['text', 'image'] },
+            { id: '~anthropic/claude-fable-latest', name: 'Claude Fable', input: ['text', 'image'] },
+          ],
+        },
+      },
+    },
+    agents: {
+      defaults: {
+        model: { primary: 'openrouter/stealth/space-bunny-alpha', fallbacks: [] },
+        imageModel: { primary: 'openrouter/google/gemini-3.8-flash', fallbacks: [] },
+      },
+      list: [],
+    },
+  }
+
+  const result = await materializeSelectedProviderCatalogs(config, {
+    getModelCatalog: async () => {
+      throw new Error('all selected models already have runtime metadata')
+    },
+  })
+
+  assert.equal(result.changed, true)
+  assert.deepEqual(
+    result.config.models.providers.openrouter.models.map(model => model.id),
+    ['stealth/space-bunny-alpha', 'google/gemini-3.8-flash'],
+  )
+})
+
+test('materializeSelectedProviderCatalogs does not re-add unselected models when refreshing a selected model', async () => {
+  const config = {
+    models: {
+      providers: {
+        openrouter: {
+          models: [
+            { id: 'stealth/space-bunny-alpha', name: 'Space Bunny', input: ['text'] },
+            { id: '~anthropic/claude-fable-latest', name: 'Claude Fable', input: ['text', 'image'] },
+          ],
+        },
+      },
+    },
+    agents: {
+      defaults: {
+        model: { primary: 'openrouter/stealth/space-bunny-alpha', fallbacks: [] },
+        imageModel: { primary: 'openrouter/google/gemini-3.8-flash', fallbacks: [] },
+      },
+      list: [],
+    },
+  }
+
+  const result = await materializeSelectedProviderCatalogs(config, {
+    getModelCatalog: async () => providerCatalog('openrouter', [
+      { id: 'stealth/space-bunny-alpha', name: 'Space Bunny', capabilities: { inputModalities: ['text'] } },
+      { id: 'google/gemini-3.8-flash', name: 'Gemini', capabilities: { inputModalities: ['text', 'image'] } },
+      { id: '~anthropic/claude-fable-latest', name: 'Claude Fable', capabilities: { inputModalities: ['text', 'image'] } },
+    ]),
+  })
+
+  assert.deepEqual(
+    result.config.models.providers.openrouter.models.map(model => model.id),
+    ['google/gemini-3.8-flash', 'stealth/space-bunny-alpha'],
+  )
+})
+
 test('materializeProviderCatalogsForRefs adds documented Kilo auto image fallback even when live catalog omits metadata', async () => {
   const config = {
     env: { KILOCODE_API_KEY: 'kc-secret-value' },

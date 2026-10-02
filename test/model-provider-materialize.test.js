@@ -361,6 +361,19 @@ test('model definition normalization keeps image input and reasoning metadata', 
   assert.equal(model.cost.output, 2)
 })
 
+test('Gemini 3.8 Flash keeps minimum reasoning enabled for image requests', () => {
+  const model = _internal.toModelDefinition({
+    id: 'google/gemini-3.8-flash',
+    name: 'Google: Gemini 3.8 Flash',
+    capabilities: {
+      inputModalities: ['text', 'image'],
+      supportedParameters: ['reasoning'],
+    },
+  }, 'openrouter')
+
+  assert.deepEqual(model.thinkingLevelMap, { off: 'minimal' })
+})
+
 test('model definition drops provider input modalities not accepted by runtime catalog schema', () => {
   const model = _internal.toModelDefinition({
     id: 'vendor/multimodal',

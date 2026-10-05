@@ -77,7 +77,7 @@ test('readiness passes when primary, fallback, and image models exist in live ca
   assert.equal(readiness.agents[0].imageModel.primary.status, 'ready')
 })
 
-test('missing separate imageModel is not a warning when image understanding can use the primary chat model path', async () => {
+test('agent with image tool requires an explicit image model to prevent automatic provider routing', async () => {
   clearModelRuntimeTestCache()
   const config = {
     agents: {
@@ -102,7 +102,11 @@ test('missing separate imageModel is not a warning when image understanding can 
   })
 
   assert.equal(readiness.agents[0].imageModel.configured, false)
-  assert.equal(readiness.warnings.some(item => item.id.includes('model.image.stock')), false)
+  assert.equal(readiness.ok, false)
+  assert.equal(readiness.blockingIssues.some(issue => (
+    issue.scope === 'agents.stock.imageModel'
+      && issue.status === 'image_model_required'
+  )), true)
 })
 
 test('readiness marks runtime verified after a runtime test passes', async () => {

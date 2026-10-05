@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict')
 const test = require('node:test')
 const { EventEmitter } = require('node:events')
+const fs = require('node:fs')
 
 const {
   TEXT_TIMEOUT_MS,
@@ -201,6 +202,36 @@ test('runtime model test maps unsupported image attachments to not_image_capable
   assert.equal(result.ok, false)
   assert.equal(result.status, 'not_image_capable')
   assert.match(result.safeMessage, /รูปภาพ/)
+})
+
+test('runtime image smoke test uses a provider-safe 256px fixture', async () => {
+  clearModelRuntimeTestCache()
+  let dimensions = null
+  const spawnImpl = spawnFor(args => {
+    if (args.includes('--version')) return { stdout: 'OpenClaw 2026.6.8 (test)\n' }
+    const file = args[args.indexOf('--file') + 1]
+    const png = fs.readFileSync(file)
+    dimensions = {
+      width: png.readUInt32BE(16),
+      height: png.readUInt32BE(20),
+    }
+    return {
+      stdout: JSON.stringify({
+        ok: true,
+        outputs: [{ text: 'OPENCLAW_IMAGE_TEST_OK' }],
+      }),
+    }
+  })
+
+  const result = await runModelRuntimeTest({
+    model: 'openrouter/google/gemini-2.5-flash-lite',
+    capability: 'image',
+    config: { env: { OPENROUTER_API_KEY: 'sk-or-test' } },
+    spawnImpl,
+  })
+
+  assert.equal(result.ok, true)
+  assert.deepEqual(dimensions, { width: 256, height: 256 })
 })
 
 test('runtime status is unverified before a runtime test has run', () => {

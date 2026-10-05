@@ -70,6 +70,9 @@ test('template search guidance is generic and avoids business-specific examples'
 
   assert.match(soul, /ยี่ห้อ ผู้ผลิต รุ่น ประเภทสินค้า หรือรหัส/)
   assert.match(soul, /retry ได้ไม่เกิน 1 ครั้ง/)
+  assert.match(soul, /description_excerpt หรือ stages.*description_fuzzy/)
+  assert.match(soul, /ห้ามตอบว่า "ไม่พบ"/)
+  assert.match(soul, /ห้ามลดเหลือคำกว้างเพียงคำเดียว/)
   assert.match(soul, /ห้ามค้นแยกทีละคำจนได้รายการไม่เกี่ยวข้องจำนวนมาก/)
   assert.doesNotMatch(soul, /หลอดไฟ/i)
   assert.doesNotMatch(soul, /kotto/i)

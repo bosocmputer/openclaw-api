@@ -68,6 +68,8 @@ test('template grounds answers in tool results and avoids generic market estimat
 test('template search guidance is generic and avoids business-specific examples', () => {
   const soul = generateSoulTemplate(null, 'general', null, 'professional')
 
+  assert.match(soul, /ทุก user turn ที่ถามความมีอยู่ของสินค้า ราคา สต็อก หรือข้อมูลสินค้า ต้องเรียก MCP tool ที่เกี่ยวข้องใน turn นั้นอย่างน้อย 1 ครั้ง/)
+  assert.match(soul, /ห้ามใช้ผลการค้นหาหรือคำตอบจาก turn ก่อนหน้าเป็นหลักฐานปัจจุบัน แม้ user ถามซ้ำด้วยข้อความเดิม/)
   assert.match(soul, /ยี่ห้อ ผู้ผลิต รุ่น ประเภทสินค้า หรือรหัส/)
   assert.match(soul, /retry ได้ไม่เกิน 1 ครั้ง/)
   assert.match(soul, /description_excerpt หรือ stages.*description_fuzzy/)

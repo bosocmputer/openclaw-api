@@ -3,12 +3,17 @@ const test = require('node:test')
 const { EventEmitter } = require('node:events')
 
 const {
+  TEXT_TIMEOUT_MS,
   clearModelRuntimeTestCache,
   runModelImageMessageTest,
   runModelRuntimeTest,
   runtimeStatusForRef,
   _internal,
 } = require('../lib/model-runtime-test')
+
+test('text model tests allow free providers up to 60 seconds', () => {
+  assert.equal(TEXT_TIMEOUT_MS, 60_000)
+})
 
 function fakeChild({ stdout = '', stderr = '', code = 0, delayMs = 0 }) {
   const child = new EventEmitter()
